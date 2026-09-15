@@ -1,0 +1,83 @@
+name: Prever torneio
+
+# A cada 30 minutos, e isso NAO e exagero.
+#
+# Regra da Metaculus, verbatim: "These will launch at random hours during the
+# week and will be open for 1.5 hours each." Ou seja, a pergunta abre em hora
+# aleatoria e fecha em 1h30. Perder a janela nao e "perder um pouco de ponto":
+# como o premio usa o quadrado do total e a pergunta perdida conta zero, cada
+# janela perdida sai cara.
+#
+# O cron do GitHub Actions costuma atrasar alguns minutos sob carga. Com 30 em
+# 30 minutos voce tem duas ou tres tentativas dentro de cada janela de 1h30.
+#
+# Custo: uma execucao que nao acha pergunta nova gasta so uma chamada de API.
+# Se o repositorio for publico, os minutos de Actions sao ilimitados.
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Onde prever"
+        required: true
+        default: tournament
+        type: choice
+        options: [test, tournament, minibench, cup, market_pulse]
+      publish:
+        description: "Publicar de verdade na Metaculus"
+        required: true
+        default: false
+        type: boolean
+
+# Evita duas execucoes simultaneas prevendo a mesma pergunta.
+concurrency:
+  group: forecast
+  cancel-in-progress: false
+
+jobs:
+  forecast:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Instalar dependencias
+        run: uv sync --frozen
+
+      - name: Rodar o bot
+        env:
+          METACULUS_TOKEN: ${{ secrets.METACULUS_TOKEN }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          CALIBRATION_A: ${{ vars.CALIBRATION_A }}
+          CALIBRATION_B: ${{ vars.CALIBRATION_B }}
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            # Execucao automatica: e para valer, publica.
+            MODE=tournament
+            PUBLISH=true
+          else
+            # Execucao manual: obedece exatamente o que foi escolhido no botao.
+            MODE="${{ github.event.inputs.mode }}"
+            PUBLISH="${{ github.event.inputs.publish }}"
+          fi
+          echo "modo=$MODE publicar=$PUBLISH"
+          if [ "$PUBLISH" = "true" ]; then
+            uv run python main.py --mode "$MODE" --publish
+          else
+            uv run python main.py --mode "$MODE"
+          fi
+
+      - name: Guardar relatorios
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: relatorios-${{ github.run_id }}
+          path: logs/
+          if-no-files-found: ignore
+          retention-days: 30

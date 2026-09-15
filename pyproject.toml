@@ -1,0 +1,10 @@
+[project]
+name = "metaculus-bot"
+version = "0.1.0"
+description = "Bot de previsao para os torneios FutureEval da Metaculus"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "forecasting-tools>=0.2.90",
+    "python-dotenv>=1.2.3",
+]
