@@ -32,6 +32,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 from datetime import datetime
 
 from forecasting_tools import (
@@ -119,6 +120,49 @@ class ForecasterBot(ForecastBot):
     # PESQUISA
     # ------------------------------------------------------------------
 
+    _META_RE = re.compile(
+        r"community (?:prediction|forecast)[^?]{0,80}?(higher|lower|above|below|greater|less)"
+        r"[^?]{0,40}?(\d+(?:\.\d+)?)\s*%",
+        re.IGNORECASE,
+    )
+
+    def _meta_question_block(self, question: MetaculusQuestion) -> str:
+        """
+        Instrucao extra para as meta-perguntas do MiniBench.
+
+        Muitas perguntas do MiniBench tem a forma "a previsao da comunidade
+        vai estar acima de X% na data D para a pergunta Q?". Jeff Mohl (bot
+        Delphi) perdeu suas TRES piores pontuacoes de uma rodada porque a
+        busca web alucinou o valor atual da comunidade (leu 42% quando era
+        35%, 75% quando era 90%) e o resto do raciocinio herdou o erro.
+
+        A correcao ideal seria ler o numero direto da API. Testado em
+        2026-09-19: o token de bot NAO enxerga a previsao da comunidade em
+        perguntas que ele nao previu (0 de 6 perguntas abertas). Isso exige o
+        "Bot Benchmarking Access Tier" da Metaculus. Enquanto ele nao chega,
+        o melhor que da para fazer e obrigar a busca a ir na pagina exata e
+        declarar a incerteza em vez de inventar.
+        """
+        text = question.question_text or ""
+        m = self._META_RE.search(text)
+        if not m:
+            return ""
+        direcao, limiar = m.group(1), m.group(2)
+        return clean_indents(
+            f"""
+            (g) THIS IS A META-QUESTION about another Metaculus question's
+                community prediction, with threshold {limiar}% ({direcao}).
+                Your single most important job is the CURRENT value of that
+                community prediction. Open the referenced Metaculus question
+                page itself and read the number shown there. Report it as
+                "Community prediction now: N% (seen on <date/time>)". Do NOT
+                infer it from news articles or from memory. If you cannot open
+                the page, write "Community prediction now: UNKNOWN" and say so.
+                A wrong anchor here is worse than no anchor: the forecaster
+                will reason about drift from whatever number you give.
+            """
+        )
+
     async def run_research(self, question: MetaculusQuestion) -> str:
         async with self._concurrency_limiter:
             prompt = clean_indents(
@@ -144,10 +188,16 @@ class ForecasterBot(ForecastBot):
                     comparable past cases? Name the reference class you used.
                 (d) Scheduled events before resolution that could change the outcome.
                 (e) What informed observers, experts or markets currently expect.
-
+                (f) Prediction markets: search Polymarket, Kalshi, Manifold and
+                    Metaculus for this exact question or its closest match. If
+                    you find one, quote the current price, the market, and the
+                    date you saw it. This is one input, not the answer.
+                {self._meta_question_block(question)}
                 State plainly where evidence is missing or contradictory. Never
                 pad. If the question would resolve today on current information,
-                say which way and why.
+                say which way and why. Every number you report must come with
+                its source and date; a number you cannot source is a guess, and
+                you must label it as one.
                 """
             )
 
@@ -201,7 +251,23 @@ class ForecasterBot(ForecastBot):
             You write your rationale remembering that good forecasters put extra
             weight on the status quo outcome since the world changes slowly most
             of the time. You also remember that most things that have never
-            happened before do not happen in the next few months.
+            happened before do not happen in the next few months. Historically,
+            forecasters like you have been overconfident, and only about 35% of
+            Metaculus binary questions resolve Yes.
+
+            Before you commit, check three things that sink otherwise good
+            forecasts:
+            - The principal actor may have a face-saving route to the outcome
+              that you have not listed. A government can return a deportee by
+              indicting him; a candidate can enter a race by resigning first; a
+              company can skip its usual staged rollout. Name that route
+              explicitly before dismissing the outcome.
+            - If your research quotes a number as the current state, ask
+              whether it is sourced and dated. A stale or misread anchor is the
+              single most common cause of catastrophic misses.
+            - If the question is about an index or a scale, check its floor and
+              ceiling. An outcome outside the range is impossible, not merely
+              unlikely.
 
             Two Metaculus resolution conventions that trip up forecasters:
             - If your research does not positively show that the event has

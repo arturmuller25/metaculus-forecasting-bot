@@ -81,9 +81,18 @@ if _HAS_OPENROUTER:
     #     raciocinio, sem a linha "Probability", e o parser descarta.
     # Duas familias ja e heterogeneo. Se a Metaculus liberar cota do Google,
     # e so acrescentar aqui e testar de novo.
+    #
+    # Sufixo :online nos membros do ensemble, de proposito. Sem ele os dois
+    # modelos leem o MESMO briefing de pesquisa e a diversidade que o
+    # ensemble compra some. Jan Flatley-Feldman, dono do melhor bot open
+    # source de duas temporadas, escreveu: "the worst misses come with all
+    # three models agreeing on a shared briefing". Com :online cada membro
+    # busca por conta propria, alem de ler o briefing compartilhado. E a
+    # receita que a xAI usou para chegar a paridade com superforecasters no
+    # ForecastBench: dar busca ao modelo e tirar a media de varias rodadas.
     _ENSEMBLE = [
-        "openrouter/openai/gpt-5.4",
-        "openrouter/anthropic/claude-sonnet-4.6",
+        "openrouter/openai/gpt-5.4:online",
+        "openrouter/anthropic/claude-sonnet-4.6:online",
     ]
 else:
     _FORECAST = "metaculus/claude-sonnet-4-5"
