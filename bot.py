@@ -55,6 +55,12 @@ from calibration import apply_platt
 logger = logging.getLogger(__name__)
 
 
+def _env_float(name: str, default: float) -> float:
+    """Le um float do ambiente tratando vazio e espacos como ausente."""
+    raw = (os.getenv(name) or "").strip()
+    return float(raw) if raw else default
+
+
 def _trimmed_mean(valores: list[float]) -> float:
     """
     Consenso do ensemble descartando os extremos.
@@ -94,8 +100,11 @@ class ForecasterBot(ForecastBot):
         super().__init__(*args, **kwargs)
 
         # Coeficientes de calibracao vindos do .env. Identidade por padrao.
-        self._cal_a = float(os.getenv("CALIBRATION_A", "1.0"))
-        self._cal_b = float(os.getenv("CALIBRATION_B", "0.0"))
+        # _env_float e nao float(os.getenv(...)): no GitHub Actions uma
+        # variavel de repositorio nao definida chega como string VAZIA, nao
+        # como ausente, e float("") derruba o bot antes da primeira pergunta.
+        self._cal_a = _env_float("CALIBRATION_A", 1.0)
+        self._cal_b = _env_float("CALIBRATION_B", 0.0)
         if (self._cal_a, self._cal_b) != (1.0, 0.0):
             logger.info(f"Calibracao ativa: A={self._cal_a}, B={self._cal_b}")
 
