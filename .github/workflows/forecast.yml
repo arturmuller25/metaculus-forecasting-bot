@@ -1,27 +1,39 @@
 name: Prever torneio
 
-# A cada 30 minutos, e isso NAO e exagero.
+# POR QUE ESTE WORKFLOW E UM LOOP, E NAO UM CRON SIMPLES
 #
-# Regra da Metaculus, verbatim: "These will launch at random hours during the
-# week and will be open for 1.5 hours each." Ou seja, a pergunta abre em hora
-# aleatoria e fecha em 1h30. Perder a janela nao e "perder um pouco de ponto":
-# como o premio usa o quadrado do total e a pergunta perdida conta zero, cada
-# janela perdida sai cara.
+# A regra da Metaculus, verbatim: "These will launch at random hours during
+# the week and will be open for 1.5 hours each." Pergunta perdida conta zero
+# numa formula de premio que eleva o total ao quadrado. Cada janela perdida
+# sai cara.
 #
-# O cron do GitHub Actions costuma atrasar alguns minutos sob carga. Com 30 em
-# 30 minutos voce tem duas ou tres tentativas dentro de cada janela de 1h30.
+# O cron do GitHub Actions NAO e confiavel para isso. Medido neste
+# repositorio em 2026-09-19: agendado para cada 30 minutos, o intervalo real
+# entre execucoes ficou entre 2 e 5 horas. E comportamento documentado do
+# GitHub ("the schedule event can be delayed during periods of high load"),
+# pior em repositorio novo e de pouca atividade.
 #
-# Custo: uma execucao que nao acha pergunta nova gasta so uma chamada de API.
-# Se o repositorio for publico, os minutos de Actions sao ilimitados.
+# A solucao: cada execucao agendada fica VIVA por ate 5h30, prevendo a cada
+# 20 minutos. O agendamento continua disparando, atrasado ou nao, e a proxima
+# execucao entra na fila (grupo de concorrencia) e assume quando a atual
+# terminar. Mesmo com o GitHub atrasando 5 horas, sempre ha uma execucao
+# rodando. O teto de 6 horas por job do GitHub e o limite duro; 5h30 deixa
+# margem para a ultima previsao terminar.
+#
+# Custo: uma iteracao sem pergunta nova gasta uma chamada de API e nada de
+# LLM. Repositorio publico tem minutos de Actions ilimitados.
+#
+# Minutos "fora de pico" (7 e 37 em vez de 0 e 30) porque o GitHub atrasa
+# mais nas viradas de hora, quando todo mundo agenda.
 on:
   schedule:
-    - cron: "*/30 * * * *"
+    - cron: "7,37 * * * *"
   workflow_dispatch:
     inputs:
       mode:
         description: "Onde prever"
         required: true
-        default: tournament
+        default: test
         type: choice
         options: [test, tournament, minibench, cup, market_pulse]
       publish:
@@ -29,8 +41,14 @@ on:
         required: true
         default: false
         type: boolean
+      loop:
+        description: "Ficar em loop por 5h30 (como o agendado) em vez de rodar uma vez"
+        required: true
+        default: false
+        type: boolean
 
-# Evita duas execucoes simultaneas prevendo a mesma pergunta.
+# Uma execucao por vez. A proxima agendada espera na fila em vez de rodar em
+# paralelo e mandar duas previsoes para a mesma pergunta.
 concurrency:
   group: forecast
   cancel-in-progress: false
@@ -38,7 +56,9 @@ concurrency:
 jobs:
   forecast:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # Teto duro do GitHub e 360. O loop para sozinho em ~330 e este valor
+    # so existe para o caso de uma previsao travar.
+    timeout-minutes: 355
     steps:
       - uses: actions/checkout@v4
 
@@ -56,22 +76,50 @@ jobs:
           CALIBRATION_A: ${{ vars.CALIBRATION_A }}
           CALIBRATION_B: ${{ vars.CALIBRATION_B }}
         run: |
-          set -euo pipefail
+          set -uo pipefail
           if [ "${{ github.event_name }}" = "schedule" ]; then
-            # Execucao automatica: e para valer, publica.
+            # Execucao automatica: para valer, publica, e fica em loop.
             MODE=tournament
             PUBLISH=true
+            LOOP=true
           else
             # Execucao manual: obedece exatamente o que foi escolhido no botao.
             MODE="${{ github.event.inputs.mode }}"
             PUBLISH="${{ github.event.inputs.publish }}"
+            LOOP="${{ github.event.inputs.loop }}"
           fi
-          echo "modo=$MODE publicar=$PUBLISH"
-          if [ "$PUBLISH" = "true" ]; then
-            uv run python main.py --mode "$MODE" --publish
-          else
-            uv run python main.py --mode "$MODE"
+
+          ARGS="--mode $MODE"
+          if [ "$PUBLISH" = "true" ]; then ARGS="$ARGS --publish"; fi
+          # Teste manual limitado a 3 perguntas: prova os tres tipos por
+          # ~US$ 0,40 em vez de rodar as 10 da area de testes por ~US$ 1,30.
+          if [ "$MODE" = "test" ]; then ARGS="$ARGS --limit 3"; fi
+          echo "modo=$MODE publicar=$PUBLISH loop=$LOOP args=[$ARGS]"
+
+          if [ "$LOOP" != "true" ]; then
+            uv run python main.py $ARGS
+            exit $?
           fi
+
+          # ---- loop de 5h30, prevendo a cada 20 minutos ----
+          INICIO=$(date +%s)
+          TETO=$((5 * 3600 + 30 * 60))
+          PAUSA=$((20 * 60))
+          ITER=0
+          while :; do
+            ITER=$((ITER + 1))
+            echo "::group::iteracao $ITER  ($(date -u +%H:%M:%S) UTC)"
+            # Uma iteracao que falha (rede, limite de requisicao, erro numa
+            # pergunta) NAO pode derrubar o loop: o proximo ciclo tenta de novo.
+            uv run python main.py $ARGS || echo "iteracao $ITER falhou, seguindo"
+            echo "::endgroup::"
+            AGORA=$(date +%s)
+            if [ $((AGORA - INICIO + PAUSA)) -ge $TETO ]; then
+              echo "teto de tempo atingido apos $ITER iteracoes; encerrando para a proxima execucao assumir"
+              break
+            fi
+            sleep $PAUSA
+          done
 
       - name: Guardar relatorios
         if: always()
