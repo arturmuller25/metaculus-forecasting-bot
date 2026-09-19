@@ -68,10 +68,22 @@ if _HAS_OPENROUTER:
     _FORECAST = "openrouter/openai/gpt-5.4"
     _RESEARCH = "openrouter/openai/gpt-5.4:online"
     _PARSER = "openrouter/openai/gpt-4o-mini"
+    # Sem Google no ensemble, e nao por escolha. Medido em 2026-09-18 com a
+    # chave doada pela Metaculus:
+    #   - gemini-3.1-pro pelo AI Studio: cota ZERO
+    #     ("free_tier_input_token_count, limit: 0")
+    #   - gemini-3.8-flash pelo AI Studio: free tier, 20 requisicoes/min
+    #     ("free_tier_requests, limit: 20"), estoura com ensemble + parser
+    #   - rota Vertex, que teria cota: bloqueada pela chave
+    #     ("allowed-providers setting permits only: openai, anthropic,
+    #     google-ai-studio")
+    #   - e o Flash e modelo de raciocinio: devolve so os tokens de
+    #     raciocinio, sem a linha "Probability", e o parser descarta.
+    # Duas familias ja e heterogeneo. Se a Metaculus liberar cota do Google,
+    # e so acrescentar aqui e testar de novo.
     _ENSEMBLE = [
         "openrouter/openai/gpt-5.4",
         "openrouter/anthropic/claude-sonnet-4.6",
-        "openrouter/google/gemini-3.1-pro-preview",
     ]
 else:
     _FORECAST = "metaculus/claude-sonnet-4-5"
@@ -160,42 +172,107 @@ def check_env(publish: bool) -> None:
         print("Modo simulacao: nada sera publicado. Use --publish para valer.\n")
 
 
-async def run(mode: str, publish: bool, samples: int) -> list:
+def openrouter_usage() -> float | None:
+    """
+    Gasto acumulado da chave da OpenRouter, em dolares, direto da fonte.
+
+    Existe porque o MonetaryCostManager nao enxerga tudo: modelos com sufixo
+    :online nao reportam custo para a biblioteca, e tokens de raciocinio
+    escondidos tambem escapam. O endpoint /key da OpenRouter e o numero que
+    vai de fato ser debitado dos seus creditos.
+    """
+    key = os.getenv("OPENROUTER_API_KEY")
+    if not key:
+        return None
+    import json
+    import urllib.request
+
+    req = urllib.request.Request(
+        "https://openrouter.ai/api/v1/key",
+        headers={"Authorization": f"Bearer {key}"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            data = json.load(resp).get("data", {})
+    except Exception as exc:
+        logger.warning(f"Nao consegui ler o saldo da OpenRouter: {exc}")
+        return None
+
+    # A chave doada pela Metaculus e BYOK: eles plugaram as proprias chaves
+    # de OpenAI, Anthropic e Google na OpenRouter. O gasto aparece em
+    # byok_usage, e o campo usage fica sempre em zero. Ler so usage daria
+    # zero para sempre enquanto o saldo acaba.
+    #
+    # O numero mais confiavel e limite menos restante, porque e exatamente o
+    # que conta contra o teto. Sem limite definido, soma os dois campos.
+    limit = data.get("limit")
+    remaining = data.get("limit_remaining")
+    if limit is not None and remaining is not None:
+        return float(limit) - float(remaining)
+    return float(data.get("usage") or 0.0) + float(data.get("byok_usage") or 0.0)
+
+
+def _pick(questions: list, limit: int) -> list:
+    """
+    Escolhe ate `limit` perguntas alternando entre os tipos.
+
+    Num teste, cinco perguntas binarias provam cinco vezes a mesma coisa.
+    Uma de cada tipo prova os tres caminhos de codigo do bot.
+    """
+    by_type: dict[str, list] = {}
+    for q in questions:
+        by_type.setdefault(type(q).__name__, []).append(q)
+    picked: list = []
+    while len(picked) < limit and any(by_type.values()):
+        for fila in by_type.values():
+            if fila and len(picked) < limit:
+                picked.append(fila.pop(0))
+    return picked
+
+
+async def run(mode: str, publish: bool, samples: int, limit: int | None) -> list:
     bot = build_bot(publish, samples)
     client = MetaculusClient()
+
+    targets = {
+        "tournament": [client.CURRENT_AI_COMPETITION_ID, client.CURRENT_MINIBENCH_ID],
+        "minibench": [client.CURRENT_MINIBENCH_ID],
+        "cup": [client.CURRENT_METACULUS_CUP_ID],
+        "market_pulse": [client.CURRENT_MARKET_PULSE_ID],
+        "test": ["bot-testing-area"],
+    }
+    if mode not in targets:
+        raise ValueError(f"modo desconhecido: {mode}")
+    if mode in ("cup", "test"):
+        bot.skip_previously_forecasted_questions = False
+
+    antes = openrouter_usage()
 
     # Atencao: o parametro se chama hard_limit, nao max_cost (o README da
     # biblioteca esta desatualizado nesse ponto). Ao estourar, ele levanta erro.
     with MonetaryCostManager(hard_limit=MAX_COST_PER_RUN) as cost:
-        if mode == "tournament":
-            reports = await bot.forecast_on_tournament(
-                client.CURRENT_AI_COMPETITION_ID, return_exceptions=True
-            )
-            reports += await bot.forecast_on_tournament(
-                client.CURRENT_MINIBENCH_ID, return_exceptions=True
-            )
-        elif mode == "minibench":
-            reports = await bot.forecast_on_tournament(
-                client.CURRENT_MINIBENCH_ID, return_exceptions=True
-            )
-        elif mode == "cup":
-            bot.skip_previously_forecasted_questions = False
-            reports = await bot.forecast_on_tournament(
-                client.CURRENT_METACULUS_CUP_ID, return_exceptions=True
-            )
-        elif mode == "market_pulse":
-            reports = await bot.forecast_on_tournament(
-                client.CURRENT_MARKET_PULSE_ID, return_exceptions=True
-            )
-        elif mode == "test":
-            bot.skip_previously_forecasted_questions = False
-            reports = await bot.forecast_on_tournament(
-                "bot-testing-area", return_exceptions=True
-            )
+        if limit is None:
+            reports = []
+            for tid in targets[mode]:
+                reports += await bot.forecast_on_tournament(tid, return_exceptions=True)
         else:
-            raise ValueError(f"modo desconhecido: {mode}")
+            abertas = []
+            for tid in targets[mode]:
+                abertas += client.get_all_open_questions_from_tournament(tid)
+            escolhidas = _pick(abertas, limit)
+            tipos = ", ".join(type(q).__name__.replace("Question", "") for q in escolhidas)
+            print(f"Limitado a {len(escolhidas)} de {len(abertas)} perguntas abertas: {tipos}\n")
+            reports = await bot.forecast_questions(escolhidas, return_exceptions=True)
 
-        print(f"\nCusto desta execucao: ${cost.current_usage:.4f} de ${MAX_COST_PER_RUN:.2f}")
+        rastreado = cost.current_usage
+
+    depois = openrouter_usage()
+    print(f"\nCusto rastreado pela biblioteca : ${rastreado:.4f}")
+    if antes is not None and depois is not None:
+        real = depois - antes
+        n = max(1, sum(1 for r in reports if not isinstance(r, BaseException)))
+        print(f"Custo real debitado na OpenRouter: ${real:.4f}  (${real / n:.4f} por pergunta)")
+        print(f"Gasto acumulado na chave         : ${depois:.4f}")
 
     # log_report_summary levanta RuntimeError com o traceback inteiro quando
     # tudo falha. Util para depurar, ilegivel para quem so quer saber o que
@@ -261,8 +338,17 @@ def main() -> None:
     parser.add_argument(
         "--samples",
         type=int,
-        default=5,
-        help="previsoes independentes por pergunta, agregadas (padrao: 5)",
+        default=1,
+        help=(
+            "quantas vezes rodar o ensemble inteiro por pergunta (padrao: 1). "
+            "Cada amostra ja consulta os 3 modelos, entao 3 amostras = 9 chamadas."
+        ),
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="preve no maximo N perguntas, alternando os tipos. Use para testar sem gastar o orcamento.",
     )
     args = parser.parse_args()
 
@@ -281,7 +367,7 @@ def main() -> None:
     print(f"Torneio   : {TOURNAMENT_URLS.get(args.mode, '-')}")
     print()
 
-    reports = asyncio.run(run(args.mode, args.publish, args.samples))
+    reports = asyncio.run(run(args.mode, args.publish, args.samples, args.limit))
 
     errors = [r for r in reports if isinstance(r, BaseException)]
     ok = len(reports) - len(errors)
