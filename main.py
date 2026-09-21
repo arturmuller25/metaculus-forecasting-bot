@@ -134,12 +134,15 @@ def build_bot(publish: bool, samples: int) -> ForecasterBot:
     # "agregar previsoes" em r=-0,19. Evidencia conflitante, entao fica um
     # interruptor: ENSEMBLE=0 no .env desliga e volta ao modelo unico.
     # Meca voce mesmo antes de acreditar em qualquer um dos dois estudos.
+    # ENSEMBLE_MODELS="a,b,c" no .env sobrescreve a lista, para experimentos.
+    _override = os.getenv("ENSEMBLE_MODELS", "").strip()
+    _members = [m.strip() for m in _override.split(",") if m.strip()] if _override else _ENSEMBLE
     ensemble = (
         []
         if os.getenv("ENSEMBLE", "1") == "0"
         else [
             GeneralLlm(model=m, temperature=0.3, timeout=120, allowed_tries=2)
-            for m in _ENSEMBLE
+            for m in _members
         ]
     )
 
