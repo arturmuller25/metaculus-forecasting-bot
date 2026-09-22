@@ -126,3 +126,7 @@ These spend API credits and publish nothing.
 | `main.py` | command line, model configuration, tournament selection, cost reporting |
 | `calibration.py` | Platt scaling and coefficient fitting |
 | `.github/workflows/forecast.yml` | scheduled runs |
+
+## License
+
+MIT. See [LICENSE](LICENSE).
