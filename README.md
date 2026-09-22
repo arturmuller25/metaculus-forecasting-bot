@@ -15,13 +15,17 @@ skipped):
    their results are combined into one briefing, each block labeled with its
    source: GPT-5.4 web search, Claude web search, and AskNews, Exa or
    Perplexity when their API keys are set.
-2. **Forecast.** Binary questions are forecast by two models from different
-   families (GPT-5.4 and Claude Sonnet 4.6), each reading the same briefing,
-   and the two probabilities are averaged. Numeric, discrete and
-   multiple-choice questions are forecast by GPT-5.4.
+2. **Forecast.** Two models from different families (GPT-5.4 and Claude
+   Sonnet 4.6) forecast every question from the same briefing. Binary
+   probabilities are averaged, multiple-choice probabilities are averaged per
+   option, and numeric and discrete distributions are combined by the
+   pointwise median of their CDFs.
 3. **Calibrate.** Optional Platt scaling on binary forecasts (off by default).
 4. **Publish.** The forecast is submitted together with a private comment
-   containing the reasoning.
+   containing each model's forecast and reasoning.
+
+Every model's forecast is also appended to `logs/forecasts.jsonl`, so each
+model can be scored separately once questions resolve.
 
 OpenAI and Anthropic models are called through OpenRouter. Without an
 OpenRouter key the bot falls back to the Metaculus LLM proxy, authenticated
@@ -80,8 +84,9 @@ All optional; defaults live in `main.py`. See `.env.example`.
 | `PARSER_MODEL` | `openrouter/openai/gpt-4o-mini` | extracts structured values from model output |
 | `REASONING_EFFORT` | `high` | reasoning effort for forecasting models |
 | `RESEARCH_REASONING` | `low` | reasoning effort for research calls |
-| `ENSEMBLE_MODELS` | GPT-5.4, Claude Sonnet 4.6 | comma-separated ensemble for binary questions |
+| `ENSEMBLE_MODELS` | GPT-5.4, Claude Sonnet 4.6 | comma-separated ensemble |
 | `ENSEMBLE` | on | `0` disables the ensemble |
+| `SHADOW_MODELS` | none | models that forecast every question but are only recorded, never published, e.g. `openrouter/openai/gpt-5.4@medium` |
 | `RESEARCH_PROVIDERS` | auto | force a provider list, e.g. `asknews,anthropic-search` |
 | `MAX_COST_PER_RUN` | `5.00` | cost cap per run in USD (web search cost is not tracked) |
 | `CALIBRATION_A`, `CALIBRATION_B` | `1.0`, `0.0` | Platt scaling coefficients |
@@ -96,17 +101,27 @@ provider keys) as repository secrets. Calibration coefficients go in as
 repository variables. Manual runs from the Actions tab let you choose the mode
 and whether to publish.
 
-## Calibration
-
-Once you have resolved binary questions, put them in a CSV with the columns
-`prediction,outcome` and run:
+## Measuring results
 
 ```bash
-uv run python calibration.py resolved.csv
+uv run python analyze_results.py                    # uses the Metaculus API only, no LLM cost
+uv run python analyze_results.py --fetch-artifacts  # also scores shadow models from Actions runs
 ```
 
-It fits the Platt coefficients (minimum 20 questions) and prints the two
-lines to add to `.env` when the fit improves the Brier score.
+For every resolved question the bot forecast, it scores the published
+forecast and each model separately (Brier for binary and multiple choice,
+10th-90th percentile coverage for numeric), shows the Metaculus scores, and
+writes `logs/calibration.csv`.
+
+## Calibration
+
+```bash
+uv run python calibration.py logs/calibration.csv
+```
+
+It fits the Platt coefficients and recommends them only when they beat the
+raw forecasts in leave-one-out cross-validation. It needs at least 20 resolved
+binary questions, and around 100 to detect a real miscalibration.
 
 ## Evaluation scripts
 
@@ -125,6 +140,7 @@ These spend API credits and publish nothing.
 | `bot.py` | the bot: research, forecasting for each question type, aggregation |
 | `main.py` | command line, model configuration, tournament selection, cost reporting |
 | `calibration.py` | Platt scaling and coefficient fitting |
+| `analyze_results.py` | scores resolved forecasts, overall and per model |
 | `.github/workflows/forecast.yml` | scheduled runs |
 
 ## License

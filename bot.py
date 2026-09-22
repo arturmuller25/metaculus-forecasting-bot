@@ -30,10 +30,12 @@ um placar, nao antes.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import re
-from datetime import datetime
+from datetime import datetime, timezone
+from typing import Any, Awaitable, Callable
 
 from forecasting_tools import (
     BinaryPrediction,
@@ -45,6 +47,7 @@ from forecasting_tools import (
     NumericDistribution,
     NumericQuestion,
     Percentile,
+    PredictedOption,
     PredictedOptionList,
     ReasonedPrediction,
     clean_indents,
@@ -88,6 +91,77 @@ def _trimmed_mean(valores: list[float]) -> float:
     return sum(miolo) / len(miolo)
 
 
+# Every model's forecast, one JSON object per line, for scoring once questions
+# resolve (analyze_results.py). The GitHub workflow uploads it as an artifact.
+FORECAST_LOG = os.path.join("logs", "forecasts.jsonl")
+
+
+def _serialize(prediction: Any) -> Any:
+    if isinstance(prediction, float):
+        return round(prediction, 4)
+    if isinstance(prediction, PredictedOptionList):
+        return {o.option_name: round(o.probability, 4) for o in prediction.predicted_options}
+    if isinstance(prediction, NumericDistribution):
+        return [[round(p.percentile, 4), p.value] for p in prediction.declared_percentiles]
+    return str(prediction)
+
+
+def _record(question: MetaculusQuestion, model: str, role: str, prediction: Any) -> None:
+    row = {
+        "time": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "post_id": question.id_of_post,
+        "question_id": question.id_of_question,
+        "url": question.page_url,
+        "type": type(question).__name__,
+        "model": model,
+        "role": role,
+        "forecast": _serialize(prediction),
+    }
+    try:
+        os.makedirs(os.path.dirname(FORECAST_LOG), exist_ok=True)
+        with open(FORECAST_LOG, "a", encoding="utf-8") as f:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    except OSError as exc:
+        logger.warning(f"Could not write {FORECAST_LOG}: {exc}")
+
+
+def _align_options(parsed: PredictedOptionList, options: list[str]) -> PredictedOptionList | None:
+    """
+    Maps a parsed answer onto the question's exact option names, in order, so
+    answers from different models can be averaged. Falls back to position when
+    the names do not match but the count does. Returns None when neither works.
+    """
+    by_name = {o.option_name.strip().lower(): o.probability for o in parsed.predicted_options}
+    probs = [by_name.get(name.strip().lower()) for name in options]
+    if any(p is None for p in probs):
+        if len(parsed.predicted_options) != len(options):
+            return None
+        logger.warning("Option names did not match the question; using their order")
+        probs = [o.probability for o in parsed.predicted_options]
+    total = sum(probs)
+    if total <= 0:
+        return None
+    return PredictedOptionList(
+        predicted_options=[
+            PredictedOption(option_name=name, probability=p / total)
+            for name, p in zip(options, probs)
+        ]
+    )
+
+
+def _fmt_num(value: float) -> str:
+    return f"{value:,.0f}" if abs(value) >= 1000 else f"{value:.4g}"
+
+
+def _quantile(dist: NumericDistribution, q: float) -> float:
+    """Value at cumulative probability q, interpolated from the declared percentiles."""
+    pts = sorted((p.percentile, p.value) for p in dist.declared_percentiles)
+    for (p0, v0), (p1, v1) in zip(pts, pts[1:]):
+        if p0 <= q <= p1:
+            return v0 if p1 == p0 else v0 + (v1 - v0) * (q - p0) / (p1 - p0)
+    return pts[0][1] if q < pts[0][0] else pts[-1][1]
+
+
 class ForecasterBot(ForecastBot):
     # Uma pergunta por vez. Suba se seu provedor aguentar; o limite de
     # requisicao costuma ser o gargalo, nao a CPU.
@@ -97,8 +171,21 @@ class ForecasterBot(ForecastBot):
     # Quantas vezes o parser tenta validar a extracao estruturada.
     _structure_output_validation_samples = 2
 
-    def __init__(self, *args, ensemble: list[GeneralLlm] | None = None, **kwargs) -> None:
+    def __init__(
+        self,
+        *args,
+        ensemble: list[GeneralLlm] | None = None,
+        shadows: list[tuple[str, GeneralLlm]] | None = None,
+        **kwargs,
+    ) -> None:
         super().__init__(*args, **kwargs)
+
+        # Shadow models answer every question alongside the ensemble but are
+        # only recorded to FORECAST_LOG, never aggregated or published. They
+        # let a candidate configuration be scored on live questions.
+        self._shadows = list(shadows or [])
+        if self._shadows:
+            logger.info(f"Shadow models (recorded only): {', '.join(n for n, _ in self._shadows)}")
 
         # Coeficientes de calibracao vindos do .env. Identidade por padrao.
         # _env_float e nao float(os.getenv(...)): no GitHub Actions uma
@@ -293,6 +380,55 @@ class ForecasterBot(ForecastBot):
             return research
 
     # ------------------------------------------------------------------
+    # ENSEMBLE
+    # ------------------------------------------------------------------
+
+    async def _ask_models(
+        self,
+        question: MetaculusQuestion,
+        prompt: str,
+        parse: Callable[[str], Awaitable[Any]],
+    ) -> list[tuple[str, Any, str]]:
+        """
+        Sends the same prompt to every ensemble model (or to the default model
+        when the ensemble is off) and parses each answer. Returns (model,
+        prediction, reasoning) for the models that succeeded, so one failure
+        does not sink the question. Shadow models run in parallel and are only
+        recorded.
+
+        The ensemble mixes model families on purpose: in a controlled test on
+        202 tournament questions (Schneider and Schramm, 2025), different
+        models improved Brier from 0.162 to 0.153, while repeating one model
+        did not help.
+        """
+        members = [(llm.model, llm) for llm in self._ensemble]
+        if not members:
+            default = self.get_llm("default", "llm")
+            members = [(default.model, default)]
+
+        async def ask(name: str, llm: GeneralLlm, role: str) -> tuple[str, Any, str] | None:
+            try:
+                text = await llm.invoke(prompt)
+                prediction = await parse(text)
+            except Exception as exc:
+                logger.warning(f"{name} ({role}) failed: {type(exc).__name__}: {exc}")
+                return None
+            if prediction is None:
+                logger.warning(f"{name} ({role}): answer could not be parsed")
+                return None
+            _record(question, name, role, prediction)
+            return name, prediction, text
+
+        results = await asyncio.gather(
+            *(ask(name, llm, "member") for name, llm in members),
+            *(ask(name, llm, "shadow") for name, llm in self._shadows),
+        )
+        answers = [r for r in results[: len(members)] if r is not None]
+        if not answers:
+            raise RuntimeError("every forecasting model failed on this question")
+        return answers
+
+    # ------------------------------------------------------------------
     # BINARIA
     # ------------------------------------------------------------------
 
@@ -361,49 +497,22 @@ class ForecasterBot(ForecastBot):
             """
         )
 
-        # Sem ensemble configurado: um modelo so, comportamento classico.
-        if not self._ensemble:
-            reasoning = await self.get_llm("default", "llm").invoke(prompt)
-            parsed = await self._parse_binary(reasoning)
-            logger.info(f"Previsao {question.page_url}: {parsed}")
-            return ReasonedPrediction(prediction_value=parsed, reasoning=reasoning)
+        answers = await self._ask_models(question, prompt, self._parse_binary)
+        if len(answers) == 1:
+            _, value, text = answers[0]
+            logger.info(f"Forecast {question.page_url}: {value}")
+            return ReasonedPrediction(prediction_value=value, reasoning=text)
 
-        # Com ensemble: pergunta a varios modelos DIFERENTES em paralelo.
-        #
-        # Por que modelos diferentes e nao varias amostras do mesmo: Schneider
-        # e Schramm (2025) mediram os dois em 202 perguntas do proprio torneio.
-        # Ensemble heterogeneo melhorou o Brier de 0,162 para 0,153 (p=0,014).
-        # Tres instancias do MESMO modelo nao melhoraram nada (+0,007, p=0,12).
-        # Repetir o mesmo modelo custa token e nao compra diversidade.
-        async def uma(llm) -> tuple[str, float | None, str]:
-            try:
-                texto = await llm.invoke(prompt)
-                return llm.model, await self._parse_binary(texto), texto
-            except Exception as exc:  # um modelo fora nao derruba a pergunta
-                logger.warning(f"{llm.model} falhou: {type(exc).__name__}: {exc}")
-                return llm.model, None, ""
-
-        respostas = await asyncio.gather(*(uma(llm) for llm in self._ensemble))
-        validas = [(m, p, t) for m, p, t in respostas if p is not None]
-        if not validas:
-            raise RuntimeError("todos os modelos do ensemble falharam nesta pergunta")
-
-        valores = [p for _, p, _ in validas]
-        consenso = _trimmed_mean(valores)
-
-        detalhe = "\n\n".join(
-            f"### {m} forecast {p:.0%}\n{t}" for m, p, t in validas
+        values = [p for _, p, _ in answers]
+        consensus = _trimmed_mean(values)
+        details = "\n\n".join(f"### {m} forecast {p:.0%}\n{t}" for m, p, t in answers)
+        summary = (
+            f"Ensemble of {len(answers)} models: "
+            + ", ".join(f"{p:.0%}" for p in values)
+            + f" -> consensus {consensus:.1%}"
         )
-        resumo = (
-            f"Ensemble of {len(validas)} models: "
-            + ", ".join(f"{p:.0%}" for p in valores)
-            + f" -> consensus {consenso:.1%}"
-        )
-        logger.info(f"{question.page_url}: {resumo}")
-
-        return ReasonedPrediction(
-            prediction_value=consenso, reasoning=f"{resumo}\n\n{detalhe}"
-        )
+        logger.info(f"{question.page_url}: {summary}")
+        return ReasonedPrediction(prediction_value=consensus, reasoning=f"{summary}\n\n{details}")
 
     async def _parse_binary(self, reasoning: str) -> float:
         parsed: BinaryPrediction = await structure_output(
@@ -478,9 +587,6 @@ class ForecasterBot(ForecastBot):
             """
         )
 
-        reasoning = await self.get_llm("default", "llm").invoke(prompt)
-        logger.info(f"Raciocinio para {question.page_url}: {reasoning}")
-
         parsing_instructions = clean_indents(
             f"""
             Make sure that all option names are one of the following:
@@ -494,16 +600,32 @@ class ForecasterBot(ForecastBot):
             list with 0% probability.
             """
         )
-        predicted: PredictedOptionList = await structure_output(
-            text_to_structure=reasoning,
-            output_type=PredictedOptionList,
-            model=self.get_llm("parser", "llm"),
-            num_validation_samples=self._structure_output_validation_samples,
-            additional_instructions=parsing_instructions,
-        )
+        async def parse(text: str) -> PredictedOptionList | None:
+            parsed: PredictedOptionList = await structure_output(
+                text_to_structure=text,
+                output_type=PredictedOptionList,
+                model=self.get_llm("parser", "llm"),
+                num_validation_samples=self._structure_output_validation_samples,
+                additional_instructions=parsing_instructions,
+            )
+            return _align_options(parsed, question.options)
 
-        logger.info(f"Previsao {question.page_url}: {predicted}")
-        return ReasonedPrediction(prediction_value=predicted, reasoning=reasoning)
+        answers = await self._ask_models(question, prompt, parse)
+        if len(answers) == 1:
+            _, predicted, text = answers[0]
+            logger.info(f"Forecast {question.page_url}: {predicted}")
+            return ReasonedPrediction(prediction_value=predicted, reasoning=text)
+
+        # The library's own rule for combining samples: mean probability per option.
+        combined = await super()._aggregate_predictions([p for _, p, _ in answers], question)
+
+        def fmt(options: PredictedOptionList) -> str:
+            return ", ".join(f"{o.option_name} {o.probability:.0%}" for o in options.predicted_options)
+
+        details = "\n\n".join(f"### {m} forecast: {fmt(p)}\n{t}" for m, p, t in answers)
+        summary = f"Ensemble of {len(answers)} models, averaged per option: {fmt(combined)}"
+        logger.info(f"{question.page_url}: {summary}")
+        return ReasonedPrediction(prediction_value=combined, reasoning=f"{summary}\n\n{details}")
 
     # ------------------------------------------------------------------
     # NUMERICA
@@ -569,9 +691,6 @@ class ForecasterBot(ForecastBot):
             """
         )
 
-        reasoning = await self.get_llm("default", "llm").invoke(prompt)
-        logger.info(f"Raciocinio para {question.page_url}: {reasoning}")
-
         parsing_instructions = clean_indents(
             f"""
             The text given to you is trying to give a forecast distribution for a
@@ -597,17 +716,37 @@ class ForecasterBot(ForecastBot):
             - Turn any values that are in scientific notation into regular numbers.
             """
         )
-        percentiles: list[Percentile] = await structure_output(
-            reasoning,
-            list[Percentile],
-            model=self.get_llm("parser", "llm"),
-            additional_instructions=parsing_instructions,
-            num_validation_samples=self._structure_output_validation_samples,
-        )
-        prediction = NumericDistribution.from_question(percentiles, question)
+        async def parse(text: str) -> NumericDistribution:
+            percentiles: list[Percentile] = await structure_output(
+                text,
+                list[Percentile],
+                model=self.get_llm("parser", "llm"),
+                additional_instructions=parsing_instructions,
+                num_validation_samples=self._structure_output_validation_samples,
+            )
+            return NumericDistribution.from_question(percentiles, question)
 
-        logger.info(f"Previsao {question.page_url}: {prediction.declared_percentiles}")
-        return ReasonedPrediction(prediction_value=prediction, reasoning=reasoning)
+        answers = await self._ask_models(question, prompt, parse)
+        if len(answers) == 1:
+            _, prediction, text = answers[0]
+            logger.info(f"Forecast {question.page_url}: {prediction.declared_percentiles}")
+            return ReasonedPrediction(prediction_value=prediction, reasoning=text)
+
+        # The library's own rule for combining samples: the pointwise median of
+        # the CDFs, which for two models is their average.
+        combined = await super()._aggregate_predictions([p for _, p, _ in answers], question)
+
+        def fmt(dist: NumericDistribution) -> str:
+            return " | ".join(
+                f"P{round(p.percentile * 100)} {_fmt_num(p.value)}" for p in dist.declared_percentiles
+            )
+
+        details = "\n\n".join(f"### {m} forecast: {fmt(p)}\n{t}" for m, p, t in answers)
+        summary = f"Ensemble of {len(answers)} models, CDFs combined: " + " | ".join(
+            f"P{round(q * 100)} {_fmt_num(_quantile(combined, q))}" for q in (0.1, 0.5, 0.9)
+        )
+        logger.info(f"{question.page_url}: {summary}")
+        return ReasonedPrediction(prediction_value=combined, reasoning=f"{summary}\n\n{details}")
 
     def _bound_messages(self, question: NumericQuestion) -> tuple[str, str]:
         upper = (

@@ -82,6 +82,7 @@ jobs:
           ASKNEWS_SECRET: ${{ secrets.ASKNEWS_SECRET }}
           EXA_API_KEY: ${{ secrets.EXA_API_KEY }}
           PERPLEXITY_API_KEY: ${{ secrets.PERPLEXITY_API_KEY }}
+          SHADOW_MODELS: ${{ vars.SHADOW_MODELS }}
         run: |
           set -uo pipefail
           if [ "${{ github.event_name }}" = "schedule" ]; then
@@ -137,3 +138,12 @@ jobs:
           path: logs/
           if-no-files-found: ignore
           retention-days: 30
+
+      - name: Keep forecast records
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: forecast-records-${{ github.run_id }}
+          path: logs/forecasts.jsonl
+          if-no-files-found: ignore
+          retention-days: 90

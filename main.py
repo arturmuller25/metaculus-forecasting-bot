@@ -174,8 +174,18 @@ def build_bot(publish: bool, samples: int) -> ForecasterBot:
         else [_thinker(m, 0.3, 120) for m in _members]
     )
 
+    # Shadow models: forecast every question on the same research, recorded to
+    # logs/forecasts.jsonl but never published. SHADOW_MODELS="model[@effort],..."
+    # e.g. "openrouter/openai/gpt-5.4@medium" to test a cheaper forecaster.
+    shadows = []
+    for spec in (s.strip() for s in os.getenv("SHADOW_MODELS", "").split(",")):
+        if spec:
+            model, _, effort = spec.partition("@")
+            shadows.append((spec, _thinker(model.strip(), 0.3, 120, effort=effort.strip() or None)))
+
     return ForecasterBot(
         ensemble=ensemble,
+        shadows=shadows,
         # 1 pesquisa por pergunta, N previsoes sobre ela, agregadas.
         # Este e o formato do bot de referencia da propria Metaculus.
         research_reports_per_question=1,
