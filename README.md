@@ -1,189 +1,128 @@
-# Bot de previsão para os torneios da Metaculus
+# Metaculus Forecasting Bot
 
-Bot que prevê eventos reais nos torneios FutureEval da Metaculus. Premiação de
-US$ 50 mil por temporada, três temporadas por ano, mais o MiniBench de US$ 1 mil
-a cada duas semanas. Não se aposta capital próprio, e a Metaculus banca os
-créditos de LLM dos participantes.
+An automated forecasting bot for the [Metaculus FutureEval](https://www.metaculus.com/futureeval/)
+AI benchmark tournaments: the seasonal bot tournament (Fall 2026) and the
+biweekly MiniBench. It finds open questions, researches them, forecasts, and
+publishes each forecast with its reasoning. Built on Metaculus's
+[forecasting-tools](https://github.com/Metaculus/forecasting-tools) library.
 
-O torneio corrente é o **Fall 2026** (ID 33121), aberto desde setembro.
+## How it works
 
-## Por que este projeto existe
+For each open question (when publishing, questions it has already forecast are
+skipped):
 
-É a única arena verificada onde a evidência diz que LLM tem habilidade real de
-previsão e onde dá para ganhar dinheiro sem arriscar capital. Previsão de
-eventos em dias ou semanas é diferente de adivinhar direção de preço em 15
-minutos, que é onde a pesquisa anterior deste repositório não achou vantagem
-nenhuma.
+1. **Research.** Several independent search providers run in parallel and
+   their results are combined into one briefing, each block labeled with its
+   source: GPT-5.4 web search, Claude web search, and AskNews, Exa or
+   Perplexity when their API keys are set.
+2. **Forecast.** Binary questions are forecast by two models from different
+   families (GPT-5.4 and Claude Sonnet 4.6), each reading the same briefing,
+   and the two probabilities are averaged. Numeric, discrete and
+   multiple-choice questions are forecast by GPT-5.4.
+3. **Calibrate.** Optional Platt scaling on binary forecasts (off by default).
+4. **Publish.** The forecast is submitted together with a private comment
+   containing the reasoning.
 
-Expectativa honesta: no Q2 de 2025, os bots hobbistas ficaram cerca de 20 pontos
-atrás dos forecasters profissionais, e a projeção de paridade fica entre
-novembro de 2026 e junho de 2027. Ou seja, dá para competir, não dá para
-esperar vitória fácil.
+OpenAI and Anthropic models are called through OpenRouter. Without an
+OpenRouter key the bot falls back to the Metaculus LLM proxy, authenticated
+with `METACULUS_TOKEN`.
 
-## Instalação
+## Setup
 
-Requer Python 3.12 e [uv](https://docs.astral.sh/uv/).
+Requires Python 3.12 and [uv](https://docs.astral.sh/uv/).
 
 ```bash
-cd metaculus-bot
 uv sync
 cp .env.example .env
 ```
 
-Depois preencha o `.env`:
+Fill in `.env`:
 
-1. **`METACULUS_TOKEN`**: crie uma conta em metaculus.com, vá em
-   [configurações](https://www.metaculus.com/accounts/settings/), clique em
-   "My Forecasting Bots" e depois "Create a Bot", e copie a API Key.
-2. **`OPENROUTER_API_KEY`**: peça os créditos gratuitos do torneio pelo
-   [formulário](https://forms.gle/aQdYMq9Pisrf1v7d8). O crédito chega como
-   chave da OpenRouter. Se preferir pagar do bolso,
-   [gere uma chave](https://openrouter.ai/keys) e defina um limite de gasto nela.
+- `METACULUS_TOKEN`: create a bot account under
+  [account settings](https://www.metaculus.com/accounts/settings/) >
+  "My Forecasting Bots" and copy its API key.
+- `OPENROUTER_API_KEY`: tournament participants can request free credits
+  through [this form](https://forms.gle/aQdYMq9Pisrf1v7d8), or create a key at
+  [openrouter.ai](https://openrouter.ai/keys).
+- Optional: `ASKNEWS_API_KEY`, `EXA_API_KEY`, `PERPLEXITY_API_KEY` to add
+  research providers.
 
-## Uso
-
-Sem chave de provedor o bot usa o proxy de LLM da própria Metaculus, que
-autentica com o `METACULUS_TOKEN`. Dá para testar o encanamento inteiro antes
-de ter crédito, mas a pesquisa sai sem busca web.
+## Usage
 
 ```bash
-# Smoke test na área de testes de bots. Não publica nada.
+# Dry run on the Metaculus bot testing area (nothing is published)
 uv run python main.py --mode test
 
-# Torneio principal + MiniBench, ainda sem publicar.
+# Dry run on the live tournaments
 uv run python main.py --mode tournament
 
-# Para valer.
+# Forecast and publish
 uv run python main.py --mode tournament --publish
 ```
 
-Sem `--publish` o bot calcula tudo e grava os relatórios em `logs/`, mas não
-envia nada. Rode assim nas primeiras vezes e leia o raciocínio antes de soltar
-na competição.
+Without `--publish` the bot runs the full pipeline but submits nothing.
 
-Modos disponíveis: `test`, `tournament`, `minibench`, `cup`, `market_pulse`.
+| Flag | Meaning |
+|---|---|
+| `--mode` | `test`, `tournament` (seasonal tournament + MiniBench), `minibench`, `cup`, `market_pulse` |
+| `--publish` | submit forecasts and comments to Metaculus |
+| `--limit N` | forecast at most N questions, alternating question types |
+| `--samples N` | run the forecast step N times per question (default 1) |
 
-## Como funciona
+## Configuration
 
-Por pergunta, a biblioteca oficial `forecasting-tools` executa:
+All optional; defaults live in `main.py`. See `.env.example`.
 
-1. `run_research` uma vez, com um modelo que tem busca web ligada.
-2. `_run_forecast_on_*` cinco vezes sobre essa mesma pesquisa.
-3. Agrega as cinco previsões.
-4. Aplica a calibração, se você tiver configurado.
-5. Publica, se `--publish` estiver ligado.
+| Variable | Default | Purpose |
+|---|---|---|
+| `FORECAST_MODEL` | `openrouter/openai/gpt-5.4` | main forecasting model |
+| `RESEARCH_MODEL` | `openrouter/openai/gpt-5.4:online` | primary research model (web search) |
+| `PARSER_MODEL` | `openrouter/openai/gpt-4o-mini` | extracts structured values from model output |
+| `REASONING_EFFORT` | `high` | reasoning effort for forecasting models |
+| `RESEARCH_REASONING` | `low` | reasoning effort for research calls |
+| `ENSEMBLE_MODELS` | GPT-5.4, Claude Sonnet 4.6 | comma-separated ensemble for binary questions |
+| `ENSEMBLE` | on | `0` disables the ensemble |
+| `RESEARCH_PROVIDERS` | auto | force a provider list, e.g. `asknews,anthropic-search` |
+| `MAX_COST_PER_RUN` | `5.00` | cost cap per run in USD (web search cost is not tracked) |
+| `CALIBRATION_A`, `CALIBRATION_B` | `1.0`, `0.0` | Platt scaling coefficients |
 
-O bot cobre os três tipos de pergunta que o torneio usa: binária, múltipla
-escolha e numérica.
+## Running on GitHub Actions
 
-### As decisões de projeto, e o que as sustenta
+`.github/workflows/forecast.yml` runs the bot on a schedule. Each scheduled
+run checks for new questions every 20 minutes for about five and a half hours
+and publishes to the seasonal tournament and MiniBench; the next run takes over
+when it ends. Add `METACULUS_TOKEN` and `OPENROUTER_API_KEY` (plus any optional
+provider keys) as repository secrets. Calibration coefficients go in as
+repository variables. Manual runs from the Actions tab let you choose the mode
+and whether to publish.
 
-Tudo aqui vem das análises públicas do torneio, não de palpite. Onde a
-evidência é fraca ou conflitante, isso está dito.
+## Calibration
 
-**O modelo que decide importa mais que o andaime.** Na tabela de correlação da
-Metaculus, usar GPT-5.x como modelo de previsão final dá r=+0,42, o sinal
-isolado mais forte e o único que se repete em duas temporadas. Claude Opus, na
-mesma tabela, dá r=-0,01. Por isso o decisor padrão é GPT-5.4. Se for otimizar
-uma coisa só, otimize essa linha.
-
-**Ensemble precisa ser de modelos diferentes, não do mesmo modelo repetido.**
-Um experimento controlado em 202 perguntas deste torneio mediu os dois:
-modelos heterogêneos melhoraram o Brier de 0,162 para 0,153 (p=0,014), e três
-instâncias do mesmo modelo não mudaram nada. O consenso usa média aparada,
-descartando os extremos, que é o método descrito pelo vencedor do Q4 2024.
-
-Ressalva honesta: a tabela da Spring 2026 pontua "agregar previsões" em
-r=-0,19, e a Metaculus avisa que nenhum resultado daquela temporada sobrevive
-à correção de comparações múltiplas. Evidência conflitante. Por isso existe o
-interruptor `ENSEMBLE=0` no `.env`. Meça antes de acreditar em qualquer um dos
-dois estudos.
-
-**Calibração é o único pós-processamento com significância real.** Platt
-scaling tem p=0,00052 em perguntas binárias. Já extremização manual, que
-parece a mesma coisa, pontua r=-0,30. Este bot faz a primeira e não faz a
-segunda.
-
-**Simplicidade é uma decisão de projeto.** O tema mais repetido na pesquisa
-com os 37 participantes da Spring 2026 é que complexidade atrapalhou. Um
-deles caiu da 20ª para a 63ª posição depois de adicionar agregação em
-log-odds, extremização e mistura com a multidão. Outro removeu uma
-arquitetura de 13 papéis. Este bot é deliberadamente pequeno.
-
-### Duas proteções que vieram de erro alheio
-
-**Alarme de 50% exato.** Um participante perdeu a temporada inteira porque o
-bot caiu num fallback silencioso e passou a enviar 0,5 em tudo. Meio por cento
-cravado quase nunca é conclusão de raciocínio, quase sempre é parser quebrado.
-O bot grita no log quando isso acontece.
-
-**As duas convenções de resolução da Metaculus.** Assumir que o evento não
-aconteceu quando a pesquisa não mostra que aconteceu, e entender que "antes da
-data X" é pergunta sobre o futuro. Ignorar a primeira custou 90 pontos de peer
-score a um participante. Ambas estão no prompt.
-
-### Calibração
-
-Começa desligada, em `A=1, B=0`. Não copie coeficiente de ninguém: os seus
-dependem do seu modelo e dos seus prompts.
-
-Depois de acumular perguntas binárias resolvidas, monte um CSV assim:
-
-```csv
-prediction,outcome
-0.73,1
-0.20,0
-0.55,1
-```
-
-E rode:
+Once you have resolved binary questions, put them in a CSV with the columns
+`prediction,outcome` and run:
 
 ```bash
-uv run python calibration.py resolvidas.csv
+uv run python calibration.py resolved.csv
 ```
 
-O script recusa amostra abaixo de 20 perguntas e avisa quando o ajuste não
-melhora nada. Se melhorar, ele imprime as duas linhas para colar no `.env`.
+It fits the Platt coefficients (minimum 20 questions) and prints the two
+lines to add to `.env` when the fit improves the Brier score.
 
-Leitura dos coeficientes: `A > 1` significa que o bot é subconfiante e as
-previsões deveriam ir mais para os extremos; `A < 1` significa o contrário;
-`B` diferente de zero corrige viés sistemático para Yes ou No.
+## Evaluation scripts
 
-## Rodando sozinho no GitHub Actions
+These spend API credits and publish nothing.
 
-O arquivo `.github/workflows/forecast.yml` roda de hora em hora e publica.
-O bot pula perguntas que já respondeu, então a maior parte das execuções não
-gasta quase nada.
-
-Para ativar: suba o repositório para o GitHub, vá em Settings, depois Secrets
-and variables, depois Actions, e cadastre `METACULUS_TOKEN` e
-`OPENROUTER_API_KEY` como secrets. Se você já tiver calibrado, cadastre
-`CALIBRATION_A` e `CALIBRATION_B` como *variables*, não como secrets.
-
-A execução manual pela aba Actions deixa você escolher o modo e se publica ou
-não. A execução agendada sempre publica no torneio principal.
-
-## Custos
-
-O teto de `MAX_COST_PER_RUN` no `.env` aborta a execução ao estourar, mas não
-cobre a etapa de pesquisa: modelos com o sufixo `:online` não reportam custo
-para a biblioteca. O limite que realmente segura o gasto é o que você configura
-na própria chave da OpenRouter. Configure lá também.
-
-Se o sufixo `:online` der erro no seu provedor, tire ele do `RESEARCH_MODEL`.
-O bot continua funcionando, só pesquisa pior.
-
-## Arquivos
-
-| Arquivo | O que faz |
+| Script | What it measures |
 |---|---|
-| `bot.py` | a classe do bot: pesquisa, os três tipos de forecast, agregação |
-| `main.py` | CLI, escolha de modelos, teto de custo, seleção de torneio |
-| `calibration.py` | Platt scaling e o ajuste dos coeficientes a partir de resolvidas |
-| `.github/workflows/forecast.yml` | execução automática de hora em hora |
+| `eval_limpo.py` | Brier score on post-training-cutoff questions from the [BTF-3](https://huggingface.co/datasets/BTF-2/BTF-3) dataset, with and without research |
+| `probe_memorizacao.py` | whether a model remembers the outcomes of past questions |
+| `teste_pesquisa.py` | cost and content of the research step under different reasoning settings |
 
-## Origem
+## Files
 
-Os prompts seguem de perto o template oficial da Metaculus, de propósito: é o
-baseline que a casa usa e mede. Vale mudar depois de ter placar próprio, não
-antes.
+| File | Contents |
+|---|---|
+| `bot.py` | the bot: research, forecasting for each question type, aggregation |
+| `main.py` | command line, model configuration, tournament selection, cost reporting |
+| `calibration.py` | Platt scaling and coefficient fitting |
+| `.github/workflows/forecast.yml` | scheduled runs |

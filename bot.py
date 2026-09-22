@@ -392,12 +392,12 @@ class ForecasterBot(ForecastBot):
         consenso = _trimmed_mean(valores)
 
         detalhe = "\n\n".join(
-            f"### {m} previu {p:.0%}\n{t}" for m, p, t in validas
+            f"### {m} forecast {p:.0%}\n{t}" for m, p, t in validas
         )
         resumo = (
-            f"Ensemble de {len(validas)} modelos: "
+            f"Ensemble of {len(validas)} models: "
             + ", ".join(f"{p:.0%}" for p in valores)
-            + f" -> consenso {consenso:.1%}"
+            + f" -> consensus {consenso:.1%}"
         )
         logger.info(f"{question.page_url}: {resumo}")
 
