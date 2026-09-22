@@ -129,9 +129,9 @@ These spend API credits and publish nothing.
 
 | Script | What it measures |
 |---|---|
-| `eval_limpo.py` | Brier score on post-training-cutoff questions from the [BTF-3](https://huggingface.co/datasets/BTF-2/BTF-3) dataset, with and without research |
-| `probe_memorizacao.py` | whether a model remembers the outcomes of past questions |
-| `teste_pesquisa.py` | cost and content of the research step under different reasoning settings |
+| `eval_post_cutoff.py` | Brier score on post-training-cutoff questions from the [BTF-3](https://huggingface.co/datasets/BTF-2/BTF-3) dataset, with and without research |
+| `memorization_probe.py` | whether a model remembers the outcomes of past questions |
+| `research_settings_check.py` | cost and content of the research step under different reasoning settings |
 
 ## Files
 

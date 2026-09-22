@@ -1,13 +1,12 @@
 """
-Ponto de entrada do bot.
+Command-line entry point.
 
-Uso tipico:
-    uv run python main.py --mode test              # smoke test, nao publica
-    uv run python main.py --mode tournament        # torneio principal + MiniBench
-    uv run python main.py --mode tournament --publish
+    uv run python main.py --mode test                  # bot testing area, dry run
+    uv run python main.py --mode tournament            # seasonal tournament + MiniBench, dry run
+    uv run python main.py --mode tournament --publish  # submit forecasts
 
-Sem --publish o bot calcula tudo e salva os relatorios em logs/, mas nao
-envia nada para a Metaculus. Rode assim ate confiar na saida.
+Without --publish the bot runs the full pipeline and saves reports to logs/,
+but submits nothing.
 """
 
 from __future__ import annotations
@@ -20,9 +19,8 @@ import sys
 
 import dotenv
 
-# O console do Windows usa cp1252 por padrao. Os textos das perguntas da
-# Metaculus vem com simbolos como "≥", "—" e acentos, e o logger quebra com
-# UnicodeEncodeError no meio de uma execucao. Forca UTF-8 nas duas saidas.
+# The Windows console defaults to cp1252, and question texts contain
+# characters such as "≥" that make the logger crash mid-run. Force UTF-8.
 for _stream in (sys.stdout, sys.stderr):
     if hasattr(_stream, "reconfigure"):
         try:
@@ -39,59 +37,34 @@ from bot import ForecasterBot
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Configuracao
+# Configuration
 # ---------------------------------------------------------------------------
 
-# O modelo base e a alavanca que mais move o placar. Troque aqui.
+# Two setups, chosen by the keys present in .env:
 #
-# Dois caminhos, escolhidos automaticamente pelas chaves que existem no .env:
+# 1. OpenRouter (how tournament credits are delivered): openrouter/ prefix.
+#    The :online suffix turns on web search inside OpenRouter.
 #
-# 1. COM OPENROUTER (quando os creditos do torneio chegarem)
-#    Prefixo openrouter/. O sufixo :online liga busca web no proprio
-#    OpenRouter, evitando contratar AskNews, Exa ou Perplexity so para pesquisar.
-#
-# 2. SO COM O TOKEN DA METACULUS (da para comecar hoje)
-#    Prefixo metaculus/. A biblioteca redireciona para
-#    llm-proxy.metaculus.com/proxy/anthropic quando o nome tem "claude" ou
-#    "anthropic", e para .../proxy/openai/v1 no resto, autenticando com o
-#    proprio METACULUS_TOKEN. Nao ha :online aqui, entao a pesquisa sai sem
-#    busca web: serve para testar o encanamento, nao para competir.
+# 2. Metaculus token only: metaculus/ prefix. The library routes these calls
+#    to the Metaculus LLM proxy, authenticated with METACULUS_TOKEN. Useful
+#    for testing the pipeline.
 
 _HAS_OPENROUTER = bool(os.getenv("OPENROUTER_API_KEY"))
 
 if _HAS_OPENROUTER:
-    # GPT-5.x como modelo de previsao final e o sinal mais forte que se repete
-    # nas duas ultimas temporadas do torneio: r=+0.42 na tabela da Metaculus.
-    # Claude Opus, na mesma tabela, ficou em r=-0.01. Isso nao quer dizer que
-    # Claude seja ruim, quer dizer que quem usou GPT-5.x na decisao final
-    # pontuou melhor. Por isso ele decide, e os outros entram no ensemble.
+    # GPT-5.x as the final forecaster is the strongest signal repeated across
+    # the last two tournament seasons (r=+0.42 in Metaculus's analysis).
     _FORECAST = "openrouter/openai/gpt-5.4"
     _RESEARCH = "openrouter/openai/gpt-5.4:online"
     _PARSER = "openrouter/openai/gpt-4o-mini"
-    # Sem Google no ensemble, e nao por escolha. Medido em 2026-09-18 com a
-    # chave doada pela Metaculus:
-    #   - gemini-3.1-pro pelo AI Studio: cota ZERO
-    #     ("free_tier_input_token_count, limit: 0")
-    #   - gemini-3.8-flash pelo AI Studio: free tier, 20 requisicoes/min
-    #     ("free_tier_requests, limit: 20"), estoura com ensemble + parser
-    #   - rota Vertex, que teria cota: bloqueada pela chave
-    #     ("allowed-providers setting permits only: openai, anthropic,
-    #     google-ai-studio")
-    #   - e o Flash e modelo de raciocinio: devolve so os tokens de
-    #     raciocinio, sem a linha "Probability", e o parser descarta.
-    # Duas familias ja e heterogeneo. Se a Metaculus liberar cota do Google,
-    # e so acrescentar aqui e testar de novo.
+    # No Google model: this key has no usable Gemini quota (checked
+    # 2026-09-18: zero quota for gemini-3.1-pro, 20 requests/min for
+    # gemini-3.8-flash, which also returns only reasoning tokens, and the
+    # Vertex route is blocked by the key).
     #
-    # Ensemble SEM :online, e a diversidade vem da PESQUISA, nao de cada
-    # membro buscar de novo. Motivo medido em 2026-09-22: com os membros em
-    # :online eram 4 buscas por pergunta (2 pesquisa + 2 ensemble) e o custo
-    # real bateu US$ 4,38 numa unica pergunta, insustentavel. E as buscas
-    # dos membros repetiam os mesmos dois motores que a pesquisa ja usa.
-    # (No BTF-3 o gpt-5.4 foi de 0,159 as cegas para 0,189 com pesquisa, mas
-    # isso e ruido: t=-0,94 em 30 perguntas. Nao conta como evidencia.)
-    # Entao: a pesquisa (com varios provedores distintos) faz a busca uma
-    # vez, e os dois modelos do ensemble raciocinam sobre esse briefing ja
-    # diverso. Diversidade de familia no ensemble, de fonte na pesquisa.
+    # Ensemble members have no :online suffix. Source diversity comes from the
+    # research providers; with a web search per member, one question cost
+    # $4.38 (measured 2026-09-22) and the members repeated the same engines.
     _ENSEMBLE = [
         "openrouter/openai/gpt-5.4",
         "openrouter/anthropic/claude-sonnet-4.6",
@@ -100,8 +73,7 @@ else:
     _FORECAST = "metaculus/claude-sonnet-4-5"
     _RESEARCH = "metaculus/gpt-4o-search-preview"
     _PARSER = "metaculus/gpt-4o-mini"
-    # O proxy da Metaculus so roteia Anthropic e OpenAI, entao o ensemble
-    # possivel aqui tem duas familias, nao tres.
+    # The Metaculus proxy only routes Anthropic and OpenAI models.
     _ENSEMBLE = [
         "metaculus/claude-sonnet-4-5",
         "metaculus/gpt-4o",
@@ -111,32 +83,22 @@ FORECAST_MODEL = os.getenv("FORECAST_MODEL", _FORECAST)
 RESEARCH_MODEL = os.getenv("RESEARCH_MODEL", _RESEARCH)
 PARSER_MODEL = os.getenv("PARSER_MODEL", _PARSER)
 
-# Teto de gasto por execucao, em dolares. O processo aborta ao estourar.
+# Cost cap per run, in USD; the run aborts when it is exceeded. Web search
+# from :online models is not tracked by the library.
 MAX_COST_PER_RUN = float(os.getenv("MAX_COST_PER_RUN", "5.00"))
 
-# Esforco de raciocinio dos modelos que pensam (decisor, pesquisador, ensemble).
-# "high" e o achado mais forte de todo o material: nos pares "high" contra
-# "low" da Metaculus, o high venceu 8 de 8 vezes (p=0,004), um dos poucos
-# resultados que sobrevive a correcao de comparacoes multiplas. Custa mais
-# tokens de raciocinio, entao fica configuravel: REASONING_EFFORT=medium
-# ou low no .env se o orcamento apertar. O parser (gpt-4o-mini) fica de fora,
-# nao raciocina e nao aceita o parametro.
+# Reasoning effort for the forecasting models. "high" is the best-supported
+# finding in Metaculus's bot analyses: it beat "low" in 8 of 8 pairs
+# (p=0.004). The parser takes no reasoning parameter.
 REASONING_EFFORT = os.getenv("REASONING_EFFORT", "high").strip()
-# A pesquisa usa raciocinio BAIXO de proposito. O esforco alto foi medido
-# como valioso na PREVISAO final (8 de 8), nao na coleta de evidencia. E o
-# teste de 2026-09-22 (teste_pesquisa.py, 3 perguntas, mesmo prompt, custo
-# em tokens; as taxas por busca somaram ~US$ 0,13 por chamada em media, nao
-# medidas uma a uma):
-# baixo US$ 0,30 por chamada, medio 0,49, alto 0,59 (alto medido em uma).
-# Medio e alto nao trouxeram pesquisa mais rica: em URLs, dominios e datas o
-# baixo empatou ou venceu, fora 1 URL e 1 dominio a mais do alto numa
-# pergunta. Raciocinio a mais aqui encurta o relatorio e cobra mais.
-# Nao mede acerto (seriam ~2000 perguntas para ver 0,01 de Brier).
+# Research uses low effort. Measured 2026-09-22 with research_settings_check.py
+# on 3 questions: low, medium and high cost $0.30, $0.49 and $0.59 per call in
+# tokens, and higher effort did not return richer research.
 RESEARCH_REASONING = os.getenv("RESEARCH_REASONING", "low").strip()
 
 
 def _thinker(model: str, temperature: float, timeout: int, effort: str | None = None) -> GeneralLlm:
-    """GeneralLlm com esforco de raciocinio, para modelos que pensam."""
+    """GeneralLlm with a reasoning effort, for reasoning models."""
     effort = REASONING_EFFORT if effort is None else effort
     kwargs = dict(model=model, temperature=temperature, timeout=timeout, allowed_tries=2)
     if effort in ("low", "medium", "high"):
@@ -159,13 +121,8 @@ def build_bot(publish: bool, samples: int) -> ForecasterBot:
         "parser": GeneralLlm(model=PARSER_MODEL, temperature=0.0, timeout=60, allowed_tries=2),
         "summarizer": GeneralLlm(model=PARSER_MODEL, temperature=0.0, timeout=60),
     }
-    # O ensemble e a mudanca mais disputada do bot: um experimento controlado
-    # em 202 perguntas deste torneio mostrou ganho com modelos DIFERENTES
-    # (Brier 0,162 -> 0,153), mas a tabela de correlacao da Spring 2026 pontua
-    # "agregar previsoes" em r=-0,19. Evidencia conflitante, entao fica um
-    # interruptor: ENSEMBLE=0 no .env desliga e volta ao modelo unico.
-    # Meca voce mesmo antes de acreditar em qualquer um dos dois estudos.
-    # ENSEMBLE_MODELS="a,b,c" no .env sobrescreve a lista, para experimentos.
+    # ENSEMBLE=0 falls back to the single default model; ENSEMBLE_MODELS
+    # overrides the member list.
     _override = os.getenv("ENSEMBLE_MODELS", "").strip()
     _members = [m.strip() for m in _override.split(",") if m.strip()] if _override else _ENSEMBLE
     ensemble = (
@@ -186,18 +143,15 @@ def build_bot(publish: bool, samples: int) -> ForecasterBot:
     return ForecasterBot(
         ensemble=ensemble,
         shadows=shadows,
-        # 1 pesquisa por pergunta, N previsoes sobre ela, agregadas.
-        # Este e o formato do bot de referencia da propria Metaculus.
+        # One research report per question, `samples` forecasts on it.
         research_reports_per_question=1,
         predictions_per_research_report=samples,
         use_research_summary_to_forecast=False,
         publish_reports_to_metaculus=publish,
         folder_to_save_reports_to="logs/",
-        # NAO mexa nisso em modo publicacao. Regra da Metaculus para os
-        # torneios so-de-bot, verbatim: "Bot makers should only submit one
-        # forecast per question in these bot-only tournaments."
-        # Em modo teste roda sempre, porque na area de testes reenviar e
-        # justamente o que se quer.
+        # Metaculus rule for bot-only tournaments: "Bot makers should only
+        # submit one forecast per question in these bot-only tournaments."
+        # Dry runs forecast everything.
         skip_previously_forecasted_questions=publish,
         extra_metadata_in_explanation=True,
         llms=llms,
@@ -205,31 +159,28 @@ def build_bot(publish: bool, samples: int) -> ForecasterBot:
 
 
 def check_env(publish: bool) -> None:
-    # METACULUS_TOKEN e o unico realmente obrigatorio: sem chave de provedor
-    # o bot cai no proxy da Metaculus, que usa esse mesmo token.
+    # METACULUS_TOKEN is the only hard requirement: without a provider key the
+    # bot uses the Metaculus proxy, which authenticates with the same token.
     if not os.getenv("METACULUS_TOKEN"):
-        print("Faltando METACULUS_TOKEN.", file=sys.stderr)
-        print("Copie .env.example para .env e preencha. Detalhes no README.md.", file=sys.stderr)
+        print("METACULUS_TOKEN is missing.", file=sys.stderr)
+        print("Copy .env.example to .env and fill it in. See README.md.", file=sys.stderr)
         sys.exit(1)
 
     if not _HAS_OPENROUTER:
-        print("Sem OPENROUTER_API_KEY: usando o proxy de LLM da Metaculus.")
-        print("A pesquisa sai sem busca web. Bom para testar, fraco para competir.\n")
+        print("No OPENROUTER_API_KEY: using the Metaculus LLM proxy.")
+        print("Fine for testing the pipeline; the tournament setup uses OpenRouter.\n")
 
     if publish:
-        print("MODO PUBLICACAO: as previsoes VAO para a Metaculus.\n")
+        print("PUBLISH MODE: forecasts WILL be submitted to Metaculus.\n")
     else:
-        print("Modo simulacao: nada sera publicado. Use --publish para valer.\n")
+        print("Dry run: nothing will be published. Use --publish to submit.\n")
 
 
 def openrouter_usage() -> float | None:
     """
-    Gasto acumulado da chave da OpenRouter, em dolares, direto da fonte.
-
-    Existe porque o MonetaryCostManager nao enxerga tudo: modelos com sufixo
-    :online nao reportam custo para a biblioteca, e tokens de raciocinio
-    escondidos tambem escapam. O endpoint /key da OpenRouter e o numero que
-    vai de fato ser debitado dos seus creditos.
+    Total spent on the OpenRouter key, in USD, read from OpenRouter itself.
+    The library's cost tracking misses :online search and hidden reasoning
+    tokens; the /key endpoint shows what is actually charged.
     """
     key = os.getenv("OPENROUTER_API_KEY")
     if not key:
@@ -245,16 +196,12 @@ def openrouter_usage() -> float | None:
         with urllib.request.urlopen(req, timeout=20) as resp:
             data = json.load(resp).get("data", {})
     except Exception as exc:
-        logger.warning(f"Nao consegui ler o saldo da OpenRouter: {exc}")
+        logger.warning(f"Could not read the OpenRouter balance: {exc}")
         return None
 
-    # A chave doada pela Metaculus e BYOK: eles plugaram as proprias chaves
-    # de OpenAI, Anthropic e Google na OpenRouter. O gasto aparece em
-    # byok_usage, e o campo usage fica sempre em zero. Ler so usage daria
-    # zero para sempre enquanto o saldo acaba.
-    #
-    # O numero mais confiavel e limite menos restante, porque e exatamente o
-    # que conta contra o teto. Sem limite definido, soma os dois campos.
+    # On BYOK keys (provider keys plugged into OpenRouter) spend shows in
+    # byok_usage while usage stays at zero. Limit minus remaining is what
+    # counts against the cap; without a limit, add the two fields.
     limit = data.get("limit")
     remaining = data.get("limit_remaining")
     if limit is not None and remaining is not None:
@@ -263,20 +210,15 @@ def openrouter_usage() -> float | None:
 
 
 def _pick(questions: list, limit: int) -> list:
-    """
-    Escolhe ate `limit` perguntas alternando entre os tipos.
-
-    Num teste, cinco perguntas binarias provam cinco vezes a mesma coisa.
-    Uma de cada tipo prova os tres caminhos de codigo do bot.
-    """
+    """Picks up to `limit` questions, alternating question types, so a small test covers every code path."""
     by_type: dict[str, list] = {}
     for q in questions:
         by_type.setdefault(type(q).__name__, []).append(q)
     picked: list = []
     while len(picked) < limit and any(by_type.values()):
-        for fila in by_type.values():
-            if fila and len(picked) < limit:
-                picked.append(fila.pop(0))
+        for pending in by_type.values():
+            if pending and len(picked) < limit:
+                picked.append(pending.pop(0))
     return picked
 
 
@@ -292,41 +234,40 @@ async def run(mode: str, publish: bool, samples: int, limit: int | None) -> list
         "test": ["bot-testing-area"],
     }
     if mode not in targets:
-        raise ValueError(f"modo desconhecido: {mode}")
+        raise ValueError(f"unknown mode: {mode}")
     if mode in ("cup", "test"):
         bot.skip_previously_forecasted_questions = False
 
-    antes = openrouter_usage()
+    before = openrouter_usage()
 
-    # Atencao: o parametro se chama hard_limit, nao max_cost (o README da
-    # biblioteca esta desatualizado nesse ponto). Ao estourar, ele levanta erro.
+    # The parameter is hard_limit, not max_cost (the library README is out of
+    # date). It raises when the cap is exceeded.
     with MonetaryCostManager(hard_limit=MAX_COST_PER_RUN) as cost:
         if limit is None:
             reports = []
             for tid in targets[mode]:
                 reports += await bot.forecast_on_tournament(tid, return_exceptions=True)
         else:
-            abertas = []
+            open_questions = []
             for tid in targets[mode]:
-                abertas += client.get_all_open_questions_from_tournament(tid)
-            escolhidas = _pick(abertas, limit)
-            tipos = ", ".join(type(q).__name__.replace("Question", "") for q in escolhidas)
-            print(f"Limitado a {len(escolhidas)} de {len(abertas)} perguntas abertas: {tipos}\n")
-            reports = await bot.forecast_questions(escolhidas, return_exceptions=True)
+                open_questions += client.get_all_open_questions_from_tournament(tid)
+            chosen = _pick(open_questions, limit)
+            kinds = ", ".join(type(q).__name__.replace("Question", "") for q in chosen)
+            print(f"Limited to {len(chosen)} of {len(open_questions)} open questions: {kinds}\n")
+            reports = await bot.forecast_questions(chosen, return_exceptions=True)
 
-        rastreado = cost.current_usage
+        tracked = cost.current_usage
 
-    depois = openrouter_usage()
-    print(f"\nCusto rastreado pela biblioteca : ${rastreado:.4f}")
-    if antes is not None and depois is not None:
-        real = depois - antes
+    after = openrouter_usage()
+    print(f"\nCost tracked by the library : ${tracked:.4f}")
+    if before is not None and after is not None:
+        real_cost = after - before
         n = max(1, sum(1 for r in reports if not isinstance(r, BaseException)))
-        print(f"Custo real debitado na OpenRouter: ${real:.4f}  (${real / n:.4f} por pergunta)")
-        print(f"Gasto acumulado na chave         : ${depois:.4f}")
+        print(f"Real cost on OpenRouter     : ${real_cost:.4f}  (${real_cost / n:.4f} per question)")
+        print(f"Total spent on the key      : ${after:.4f}")
 
-    # log_report_summary levanta RuntimeError com o traceback inteiro quando
-    # tudo falha. Util para depurar, ilegivel para quem so quer saber o que
-    # deu errado. O diagnostico abaixo cuida disso.
+    # log_report_summary raises RuntimeError with the full traceback when
+    # everything fails; diagnose() explains the common cases more readably.
     try:
         bot.log_report_summary(reports)
     except RuntimeError:
@@ -335,7 +276,7 @@ async def run(mode: str, publish: bool, samples: int, limit: int | None) -> list
 
 
 def diagnose(reports: list) -> None:
-    """Traduz as falhas mais comuns em uma frase e um proximo passo."""
+    """Explains the most common failures in one sentence plus a next step."""
     errors = [r for r in reports if isinstance(r, BaseException)]
     if not errors:
         return
@@ -343,62 +284,62 @@ def diagnose(reports: list) -> None:
     blob = " ".join(str(e) for e in errors)
 
     if "allowance" in blob:
-        model = "o modelo pedido"
+        model = "the requested model"
         import re
 
         m = re.search(r"allowance for model <([^>]+)>", blob)
         if m:
             model = m.group(1)
         print(
-            f"\nDIAGNOSTICO: sua conta nao tem cota liberada para {model} no proxy da Metaculus."
-            "\nO token esta valido e as perguntas foram lidas, so falta credito de LLM."
-            "\n\nDuas saidas:"
-            "\n  1. Peca os creditos do torneio: https://forms.gle/aQdYMq9Pisrf1v7d8"
-            "\n     Eles chegam como chave da OpenRouter. Cole em OPENROUTER_API_KEY no .env."
-            "\n  2. Use chave propria da OpenAI, Anthropic ou OpenRouter no .env."
+            f"\nDIAGNOSIS: your account has no allowance for {model} on the Metaculus proxy."
+            "\nThe token is valid and the questions were read; only LLM credit is missing."
+            "\n\nTwo ways out:"
+            "\n  1. Request the tournament credits: https://forms.gle/aQdYMq9Pisrf1v7d8"
+            "\n     They arrive as an OpenRouter key. Put it in OPENROUTER_API_KEY in .env."
+            "\n  2. Use your own OpenAI, Anthropic or OpenRouter key in .env."
         )
     elif "401" in blob or "Permission" in blob or "authenticat" in blob.lower():
         print(
-            "\nDIAGNOSTICO: o METACULUS_TOKEN foi recusado."
-            "\nGere outro em Settings > My Forecasting Bots > Reveal API Key."
+            "\nDIAGNOSIS: METACULUS_TOKEN was rejected."
+            "\nCreate a new one in Settings > My Forecasting Bots > Reveal API Key."
         )
     elif "429" in blob or "rate" in blob.lower():
         print(
-            "\nDIAGNOSTICO: limite de requisicao atingido."
-            "\nBaixe _max_concurrent_questions em bot.py ou espere alguns minutos."
+            "\nDIAGNOSIS: rate limit reached."
+            "\nLower _max_concurrent_questions in bot.py or wait a few minutes."
         )
     else:
-        print("\nDIAGNOSTICO: falha nao reconhecida. Primeiro erro completo:\n")
+        print("\nDIAGNOSIS: unrecognized failure. First full error:\n")
         print(f"  {type(errors[0]).__name__}: {str(errors[0])[:600]}")
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Bot de previsao para a Metaculus")
+    parser = argparse.ArgumentParser(description="Metaculus forecasting bot")
     parser.add_argument(
         "--mode",
         choices=["test", "tournament", "minibench", "cup", "market_pulse"],
         default="test",
-        help="onde prever (padrao: test, a area de testes de bots)",
+        help="where to forecast (default: test, the bot testing area)",
     )
     parser.add_argument(
         "--publish",
         action="store_true",
-        help="envia as previsoes para a Metaculus (sem isso, so simula)",
+        help="submit forecasts to Metaculus (without it, dry run)",
     )
     parser.add_argument(
         "--samples",
         type=int,
         default=1,
         help=(
-            "quantas vezes rodar o ensemble inteiro por pergunta (padrao: 1). "
-            "Cada amostra ja consulta os 3 modelos, entao 3 amostras = 9 chamadas."
+            "how many times to run the forecast step per question (default: 1). "
+            "Each sample queries every ensemble model."
         ),
     )
     parser.add_argument(
         "--limit",
         type=int,
         default=None,
-        help="preve no maximo N perguntas, alternando os tipos. Use para testar sem gastar o orcamento.",
+        help="forecast at most N questions, alternating question types. Use it to test cheaply.",
     )
     args = parser.parse_args()
 
@@ -410,20 +351,20 @@ def main() -> None:
 
     check_env(args.publish)
 
-    print(f"Modo      : {args.mode}")
-    print(f"Modelo    : {FORECAST_MODEL}")
-    print(f"Pesquisa  : {RESEARCH_MODEL}")
-    print(f"Amostras  : {args.samples} por pergunta")
-    print(f"Torneio   : {TOURNAMENT_URLS.get(args.mode, '-')}")
+    print(f"Mode      : {args.mode}")
+    print(f"Model     : {FORECAST_MODEL}")
+    print(f"Research  : {RESEARCH_MODEL}")
+    print(f"Samples   : {args.samples} per question")
+    print(f"Tournament: {TOURNAMENT_URLS.get(args.mode, '-')}")
     print()
 
     reports = asyncio.run(run(args.mode, args.publish, args.samples, args.limit))
 
     errors = [r for r in reports if isinstance(r, BaseException)]
     ok = len(reports) - len(errors)
-    print(f"\nPerguntas previstas: {ok}. Falhas: {len(errors)}.")
+    print(f"\nQuestions forecast: {ok}. Failures: {len(errors)}.")
     if ok:
-        print("Relatorios salvos em logs/")
+        print("Reports saved in logs/")
     diagnose(reports)
 
 

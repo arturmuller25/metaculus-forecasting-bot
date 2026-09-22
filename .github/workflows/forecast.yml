@@ -1,54 +1,36 @@
-name: Prever torneio
+name: Forecast
 
-# POR QUE ESTE WORKFLOW E UM LOOP, E NAO UM CRON SIMPLES
-#
-# A regra da Metaculus, verbatim: "These will launch at random hours during
-# the week and will be open for 1.5 hours each." Pergunta perdida conta zero
-# numa formula de premio que eleva o total ao quadrado. Cada janela perdida
-# sai cara.
-#
-# O cron do GitHub Actions NAO e confiavel para isso. Medido neste
-# repositorio em 2026-09-19: agendado para cada 30 minutos, o intervalo real
-# entre execucoes ficou entre 2 e 5 horas. E comportamento documentado do
-# GitHub ("the schedule event can be delayed during periods of high load"),
-# pior em repositorio novo e de pouca atividade.
-#
-# A solucao: cada execucao agendada fica VIVA por ate 5h30, prevendo a cada
-# 20 minutos. O agendamento continua disparando, atrasado ou nao, e a proxima
-# execucao entra na fila (grupo de concorrencia) e assume quando a atual
-# terminar. Mesmo com o GitHub atrasando 5 horas, sempre ha uma execucao
-# rodando. O teto de 6 horas por job do GitHub e o limite duro; 5h30 deixa
-# margem para a ultima previsao terminar.
-#
-# Custo: uma iteracao sem pergunta nova gasta uma chamada de API e nada de
-# LLM. Repositorio publico tem minutos de Actions ilimitados.
-#
-# Minutos "fora de pico" (7 e 37 em vez de 0 e 30) porque o GitHub atrasa
-# mais nas viradas de hora, quando todo mundo agenda.
+# Why this workflow loops instead of relying on cron alone: questions open at
+# random times and stay open for a limited window (1.5 hours in the seasonal
+# tournament, 3 hours on MiniBench), while scheduled runs here started 2 to 5
+# hours apart instead of every 30 minutes (measured 2026-09-19). So each
+# scheduled run stays alive for up to 5.5 hours and checks for new questions
+# every 20 minutes, and the next scheduled run waits in the concurrency group
+# and takes over. An iteration with no new question costs one API call and no
+# LLM tokens. Cron uses off-peak minutes, which GitHub delays less.
 on:
   schedule:
     - cron: "7,37 * * * *"
   workflow_dispatch:
     inputs:
       mode:
-        description: "Onde prever"
+        description: "Where to forecast"
         required: true
         default: test
         type: choice
         options: [test, tournament, minibench, cup, market_pulse]
       publish:
-        description: "Publicar de verdade na Metaculus"
+        description: "Submit forecasts to Metaculus"
         required: true
         default: false
         type: boolean
       loop:
-        description: "Ficar em loop por 5h30 (como o agendado) em vez de rodar uma vez"
+        description: "Loop for 5.5 hours like the scheduled run, instead of running once"
         required: true
         default: false
         type: boolean
 
-# Uma execucao por vez. A proxima agendada espera na fila em vez de rodar em
-# paralelo e mandar duas previsoes para a mesma pergunta.
+# One run at a time, so two runs never forecast the same question.
 concurrency:
   group: forecast
   cancel-in-progress: false
@@ -56,8 +38,8 @@ concurrency:
 jobs:
   forecast:
     runs-on: ubuntu-latest
-    # Teto duro do GitHub e 360. O loop para sozinho em ~330 e este valor
-    # so existe para o caso de uma previsao travar.
+    # GitHub's hard limit is 360 minutes. The loop stops by itself at about
+    # 330; this only matters if a forecast hangs.
     timeout-minutes: 355
     steps:
       - uses: actions/checkout@v4
@@ -66,17 +48,17 @@ jobs:
         with:
           enable-cache: true
 
-      - name: Instalar dependencias
+      - name: Install dependencies
         run: uv sync --frozen
 
-      - name: Rodar o bot
+      - name: Run the bot
         env:
           METACULUS_TOKEN: ${{ secrets.METACULUS_TOKEN }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           CALIBRATION_A: ${{ vars.CALIBRATION_A }}
           CALIBRATION_B: ${{ vars.CALIBRATION_B }}
-          # Provedores de pesquisa extras. Secret ausente chega vazio e o bot
-          # ignora aquele provedor, entao da para cadastrar so os que tiver.
+          # Optional research providers. A missing secret arrives empty and
+          # the bot skips that provider.
           ASKNEWS_API_KEY: ${{ secrets.ASKNEWS_API_KEY }}
           ASKNEWS_CLIENT_ID: ${{ secrets.ASKNEWS_CLIENT_ID }}
           ASKNEWS_SECRET: ${{ secrets.ASKNEWS_SECRET }}
@@ -86,12 +68,12 @@ jobs:
         run: |
           set -uo pipefail
           if [ "${{ github.event_name }}" = "schedule" ]; then
-            # Execucao automatica: para valer, publica, e fica em loop.
+            # Scheduled run: tournament mode, publish, loop.
             MODE=tournament
             PUBLISH=true
             LOOP=true
           else
-            # Execucao manual: obedece exatamente o que foi escolhido no botao.
+            # Manual run: exactly what was chosen in the form.
             MODE="${{ github.event.inputs.mode }}"
             PUBLISH="${{ github.event.inputs.publish }}"
             LOOP="${{ github.event.inputs.loop }}"
@@ -99,42 +81,40 @@ jobs:
 
           ARGS="--mode $MODE"
           if [ "$PUBLISH" = "true" ]; then ARGS="$ARGS --publish"; fi
-          # Teste manual limitado a 3 perguntas: prova os tres tipos por
-          # ~US$ 1,90 em vez de rodar as 10 da area de testes por ~US$ 6
-          # (medido em 2026-09-22: US$ 0,63 por pergunta).
+          # Manual tests are limited to 3 questions, one per type.
           if [ "$MODE" = "test" ]; then ARGS="$ARGS --limit 3"; fi
-          echo "modo=$MODE publicar=$PUBLISH loop=$LOOP args=[$ARGS]"
+          echo "mode=$MODE publish=$PUBLISH loop=$LOOP args=[$ARGS]"
 
           if [ "$LOOP" != "true" ]; then
             uv run python main.py $ARGS
             exit $?
           fi
 
-          # ---- loop de 5h30, prevendo a cada 20 minutos ----
-          INICIO=$(date +%s)
-          TETO=$((5 * 3600 + 30 * 60))
-          PAUSA=$((20 * 60))
+          # ---- loop for 5.5 hours, forecasting every 20 minutes ----
+          START=$(date +%s)
+          CAP=$((5 * 3600 + 30 * 60))
+          PAUSE=$((20 * 60))
           ITER=0
           while :; do
             ITER=$((ITER + 1))
-            echo "::group::iteracao $ITER  ($(date -u +%H:%M:%S) UTC)"
-            # Uma iteracao que falha (rede, limite de requisicao, erro numa
-            # pergunta) NAO pode derrubar o loop: o proximo ciclo tenta de novo.
-            uv run python main.py $ARGS || echo "iteracao $ITER falhou, seguindo"
+            echo "::group::iteration $ITER  ($(date -u +%H:%M:%S) UTC)"
+            # A failed iteration (network, rate limit, one bad question) must
+            # not stop the loop; the next cycle tries again.
+            uv run python main.py $ARGS || echo "iteration $ITER failed, continuing"
             echo "::endgroup::"
-            AGORA=$(date +%s)
-            if [ $((AGORA - INICIO + PAUSA)) -ge $TETO ]; then
-              echo "teto de tempo atingido apos $ITER iteracoes; encerrando para a proxima execucao assumir"
+            NOW=$(date +%s)
+            if [ $((NOW - START + PAUSE)) -ge $CAP ]; then
+              echo "time cap reached after $ITER iterations; stopping so the next run takes over"
               break
             fi
-            sleep $PAUSA
+            sleep $PAUSE
           done
 
-      - name: Guardar relatorios
+      - name: Keep reports
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: relatorios-${{ github.run_id }}
+          name: reports-${{ github.run_id }}
           path: logs/
           if-no-files-found: ignore
           retention-days: 30

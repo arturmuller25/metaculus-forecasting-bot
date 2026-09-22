@@ -1,29 +1,28 @@
 """
-Diagnostico limpo: habilidade real ou memoria?
+Post-cutoff eval: real forecasting skill or memorization?
 
-O problema: na sonda de 2025, um Brier baixo podia ser memoria ou talento.
-Aqui separamos os dois, usando o BTF-3 (FutureSearch): perguntas com data de
-referencia entre 29/04 e 29/05 de 2026, DEPOIS do corte de treino do gpt-5.4
-(ago/2025) e do sonnet-4.6 (jan/2026). Nenhum dos dois pode ter decorado o
-resultado. Cada pergunta traz pesquisa congelada na data (a prova contra
-vazamento por busca) e um forecast SOTA da propria FutureSearch como baseline.
+The 2025 memorization probe could not tell memory from skill. BTF-3
+(FutureSearch) questions dated 2026-04-29 to 2026-05-29 postdate the training
+cutoffs of gpt-5.4 (Aug 2025) and sonnet-4.6 (Jan 2026), so their outcomes
+cannot have been memorized. Each question ships with research frozen at that
+date (no search leakage) and a FutureSearch SOTA forecast used as baseline.
 
-Duas condicoes por modelo:
-  CEGO      - so a pergunta, sem pesquisa. Mede conhecimento puro do modelo.
-  PESQUISA  - com o background congelado do BTF-3. Mede o processo, sem vazar.
+Two conditions per model:
+  BLIND     - question only, no research. Measures the model's own knowledge.
+  RESEARCH  - with the frozen BTF-3 background. Measures the process, leak-free.
 
-O diagnostico:
-  - Brier cego pos-corte perto da constante -> sem habilidade sem informacao;
-    o edge de 2025 (se houve) era memoria.
-  - Brier cego pos-corte bem abaixo da constante -> talento real de raciocinio.
-  - Comparar cada modelo com o proprio Brier cego de 2025 (logs da sonda).
+Interpretation (constant = always forecasting the base rate):
+  - Post-cutoff blind Brier near the constant -> no skill without information;
+    the 2025 edge (if any) was memory.
+  - Post-cutoff blind Brier well below the constant -> real reasoning skill.
+  - Compare each model with its own 2025 blind Brier (probe logs).
 
-Preparo (uma vez):
+Setup (once):
   uv pip install pyarrow
-  baixe https://huggingface.co/datasets/BTF-2/BTF-3/resolve/main/btf3_binary_questions_and_forecasts.parquet
-  para data/btf3_binary.parquet (ou aponte BTF3_PARQUET para onde salvou)
+  download https://huggingface.co/datasets/BTF-2/BTF-3/resolve/main/btf3_binary_questions_and_forecasts.parquet
+  to data/btf3_binary.parquet (or set BTF3_PARQUET to where you saved it)
 
-Uso: uv run python eval_limpo.py [n_perguntas]
+Usage: uv run python eval_post_cutoff.py [n_questions]
 """
 
 from __future__ import annotations
@@ -51,7 +50,7 @@ MODELS = {
     "sonnet-4.6": "openrouter/anthropic/claude-sonnet-4.6",
     "fable-5.1": "openrouter/anthropic/claude-fable-5.1",
 }
-# Brier cego de 2025 (da sonda), para comparar
+# 2025 blind Brier per model (from the memorization probe), for comparison
 BLIND_2025 = {"gpt-5.4": 0.169, "sonnet-4.6": 0.123, "fable-5.1": 0.063}
 N = int(sys.argv[1]) if len(sys.argv) > 1 else 30
 
@@ -82,7 +81,7 @@ def load(n):
                 "sota": sota,
             }
         )
-    # amostra determinística espalhada
+    # deterministic sample, evenly spread across the dataset
     step = max(1, len(out) // n)
     return out[::step][:n]
 
@@ -128,8 +127,8 @@ async def ask(llm, prompt):
 async def main():
     qs = load(N)
     base = sum(q["y"] for q in qs) / len(qs)
-    print(f"{len(qs)} binarias do BTF-3, datas {qs[0]['date']}..{qs[-1]['date']} (pos-corte)")
-    print(f"taxa-base de Sim: {base:.0%}\n")
+    print(f"{len(qs)} BTF-3 binary questions, dates {qs[0]['date']}..{qs[-1]['date']} (post-cutoff)")
+    print(f"base rate of Yes: {base:.0%}\n")
 
     res = {n: {"blind": [], "research": []} for n in MODELS}
     sem = asyncio.Semaphore(4)
@@ -144,27 +143,27 @@ async def main():
 
     t0 = datetime.now()
     await asyncio.gather(*(run(n, m, q) for n, m in MODELS.items() for q in qs))
-    print(f"tempo: {(datetime.now()-t0).seconds}s\n")
+    print(f"elapsed: {(datetime.now()-t0).seconds}s\n")
 
     ys = [q["y"] for q in qs]
     const = brier([(base, y) for y in ys])
     sota_pairs = [(q["sota"], q["y"]) for q in qs if q["sota"] is not None]
-    print(f"{'':12s} {'Brier CEGO':>11s} {'Brier c/PESQ':>13s} {'2025 cego':>10s} {'veredito':>28s}")
+    print(f"{'':12s} {'Brier BLIND':>11s} {'Brier RSRCH':>13s} {'2025 blind':>10s} {'verdict':>28s}")
     for name in MODELS:
         pb = [(p, q["y"]) for q, p in res[name]["blind"] if p is not None]
         pr = [(p, q["y"]) for q, p in res[name]["research"] if p is not None]
         bb, br = brier(pb), brier(pr)
         v25 = BLIND_2025[name]
-        # veredito
+        # verdict
         if bb >= const - 0.02:
-            verd = "cego ~ constante: edge era info"
+            verdict = "blind ~ constant: edge was info"
         elif bb < v25 - 0.03:
-            verd = "melhor as cegas que em 2025?!"
+            verdict = "better blind than in 2025?!"
         else:
-            verd = "habilidade real as cegas"
-        print(f"{name:12s} {bb:>11.3f} {br:>13.3f} {v25:>10.3f}   {verd:>28s}")
-    print(f"{'constante':12s} {const:>11.3f}")
-    print(f"{'SOTA BTF-3':12s} {'':>11s} {brier(sota_pairs):>13.3f}  (baseline da FutureSearch)")
+            verdict = "real skill when blind"
+        print(f"{name:12s} {bb:>11.3f} {br:>13.3f} {v25:>10.3f}   {verdict:>28s}")
+    print(f"{'constant':12s} {const:>11.3f}")
+    print(f"{'SOTA BTF-3':12s} {'':>11s} {brier(sota_pairs):>13.3f}  (FutureSearch baseline)")
 
     dump = {
         n: {
@@ -173,8 +172,8 @@ async def main():
         }
         for n in MODELS
     }
-    io.open("logs/eval_limpo.json", "w", encoding="utf-8").write(json.dumps(dump, ensure_ascii=False, indent=1))
-    print("\ndetalhe em logs/eval_limpo.json")
+    io.open("logs/eval_post_cutoff.json", "w", encoding="utf-8").write(json.dumps(dump, ensure_ascii=False, indent=1))
+    print("\ndetails in logs/eval_post_cutoff.json")
 
 
 asyncio.run(main())

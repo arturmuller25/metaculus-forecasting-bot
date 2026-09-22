@@ -1,30 +1,14 @@
 """
-Bot de previsao para os torneios FutureEval da Metaculus.
+Forecasting bot for the Metaculus FutureEval tournaments.
 
-Estrutura herdada de `ForecastBot` (biblioteca oficial forecasting-tools).
-O fluxo da classe pai, por pergunta:
-  1. roda `run_research` N vezes  (research_reports_per_question)
-  2. roda o forecast M vezes por pesquisa  (predictions_per_research_report)
-  3. agrega as N*M previsoes
-  4. publica, se publish_reports_to_metaculus=True
+Built on `ForecastBot` from forecasting-tools. For each question the parent
+class runs `run_research`, then the forecast method for the question type,
+aggregates, and publishes when publish_reports_to_metaculus is True.
 
-Tres decisoes aqui sao baseadas nas analises publicas de desempenho dos
-bots do torneio, nao em achismo:
-
-  1. O modelo base pesa mais que o andaime. A analise Q2/2025 da Metaculus
-     concluiu que trocar o modelo move mais o placar que sofisticar o
-     scaffold. Por isso o modelo e uma constante unica no topo do arquivo,
-     e nao ha cadeia de agentes elaborada.
-
-  2. Agregar varias amostras independentes ganha pontos. Mantemos o padrao
-     do template oficial: 5 previsoes por pesquisa, agregadas.
-
-  3. Platt scaling sobre o numero final rende ~0,016 de Brier. Fica em
-     `calibration.py`, desligado ate voce ter perguntas resolvidas.
-
-O prompt de forecast segue o template oficial da Metaculus de perto, de
-proposito: e o baseline que a propria casa usa e mede. Mude depois de ter
-um placar, nao antes.
+This subclass adds research from several providers, a cross-family model
+ensemble for every question type, per-model forecast records, and optional
+Platt calibration. The forecast prompts follow the official Metaculus
+template closely.
 """
 
 from __future__ import annotations
@@ -60,35 +44,28 @@ logger = logging.getLogger(__name__)
 
 
 def _env_float(name: str, default: float) -> float:
-    """Le um float do ambiente tratando vazio e espacos como ausente."""
+    """Reads a float from the environment, treating empty or blank values as unset."""
     raw = (os.getenv(name) or "").strip()
     return float(raw) if raw else default
 
 
-def _trimmed_mean(valores: list[float]) -> float:
+def _trimmed_mean(values: list[float]) -> float:
     """
-    Consenso do ensemble descartando os extremos.
-
-    E o metodo que pgodzinai descreveu depois de vencer o Q4 2024: ele rodava
-    oito previsoes, jogava fora as duas mais extremas e tirava a media
-    aritmetica das seis restantes. A media aparada protege contra um modelo
-    que viaja sozinho, sem jogar fora a informacao da dispersao como a
-    mediana pura faria.
-
-    Com poucas amostras nao da para aparar sem ficar sem dados, entao:
-      1 a 2 valores  -> media simples
-      3 a 4 valores  -> mediana
-      5 ou mais      -> descarta o menor e o maior, media do resto
+    Ensemble consensus that discards the extremes, protecting against one
+    outlying model:
+      1-2 values -> mean
+      3-4 values -> median
+      5 or more  -> drop the lowest and highest, mean of the rest
     """
-    vs = sorted(valores)
+    vs = sorted(values)
     n = len(vs)
     if n <= 2:
         return sum(vs) / n
     if n <= 4:
-        meio = n // 2
-        return vs[meio] if n % 2 else (vs[meio - 1] + vs[meio]) / 2
-    miolo = vs[1:-1]
-    return sum(miolo) / len(miolo)
+        mid = n // 2
+        return vs[mid] if n % 2 else (vs[mid - 1] + vs[mid]) / 2
+    middle = vs[1:-1]
+    return sum(middle) / len(middle)
 
 
 # Every model's forecast, one JSON object per line, for scoring once questions
@@ -163,12 +140,11 @@ def _quantile(dist: NumericDistribution, q: float) -> float:
 
 
 class ForecasterBot(ForecastBot):
-    # Uma pergunta por vez. Suba se seu provedor aguentar; o limite de
-    # requisicao costuma ser o gargalo, nao a CPU.
+    # One question at a time. Rate limits, not CPU, are the bottleneck.
     _max_concurrent_questions = 1
     _concurrency_limiter = asyncio.Semaphore(_max_concurrent_questions)
 
-    # Quantas vezes o parser tenta validar a extracao estruturada.
+    # How many samples the parser uses to validate each structured extraction.
     _structure_output_validation_samples = 2
 
     def __init__(
@@ -187,40 +163,39 @@ class ForecasterBot(ForecastBot):
         if self._shadows:
             logger.info(f"Shadow models (recorded only): {', '.join(n for n, _ in self._shadows)}")
 
-        # Coeficientes de calibracao vindos do .env. Identidade por padrao.
-        # _env_float e nao float(os.getenv(...)): no GitHub Actions uma
-        # variavel de repositorio nao definida chega como string VAZIA, nao
-        # como ausente, e float("") derruba o bot antes da primeira pergunta.
+        # Platt calibration coefficients; identity by default. _env_float
+        # because GitHub Actions passes unset repository variables as empty
+        # strings, and float("") would crash before the first question.
         self._cal_a = _env_float("CALIBRATION_A", 1.0)
         self._cal_b = _env_float("CALIBRATION_B", 0.0)
         if (self._cal_a, self._cal_b) != (1.0, 0.0):
-            logger.info(f"Calibracao ativa: A={self._cal_a}, B={self._cal_b}")
+            logger.info(f"Calibration on: A={self._cal_a}, B={self._cal_b}")
 
-        # Ensemble heterogeneo: modelos de familias diferentes respondendo a
-        # mesma pergunta. Lista vazia desliga e volta ao modelo unico.
+        # Models from different families answering the same question. An
+        # empty list falls back to the single default model.
         self._ensemble = list(ensemble or [])
         if self._ensemble:
-            nomes = ", ".join(llm.model for llm in self._ensemble)
-            logger.info(f"Ensemble com {len(self._ensemble)} modelos: {nomes}")
+            names = ", ".join(llm.model for llm in self._ensemble)
+            logger.info(f"Ensemble of {len(self._ensemble)} models: {names}")
 
-        # Provedores de pesquisa EXTRA (alem do primario). Auto-detecta pelas
-        # chaves presentes, ou RESEARCH_PROVIDERS="asknews,exa" no .env forca.
-        # "anthropic-search" e o segundo backend gratis (busca do Claude via
-        # OpenRouter), diferente da busca do GPT do provedor primario.
+        # Research providers used in addition to the primary research model,
+        # detected from the keys present or forced with RESEARCH_PROVIDERS.
+        # "anthropic-search" is Claude's web search through OpenRouter, a
+        # different engine from the primary GPT search.
         override = os.getenv("RESEARCH_PROVIDERS", "").strip()
         if override:
             wanted = [p.strip().lower() for p in override.split(",") if p.strip()]
         else:
             wanted = ["asknews", "exa", "perplexity", "anthropic-search"]
-        # so fica o que tem credencial
+        # keep only providers that have credentials
         self._research_providers = [p for p in wanted if self._provider_ready(p)]
         if self._research_providers:
-            logger.info(f"Provedores de pesquisa extra: {', '.join(self._research_providers)}")
+            logger.info(f"Extra research providers: {', '.join(self._research_providers)}")
 
     @staticmethod
     def _provider_ready(name: str) -> bool:
         if name == "asknews":
-            # O AskNewsSearcher aceita OAuth (id + secret) ou chave de API.
+            # AskNewsSearcher accepts OAuth (client id + secret) or an API key.
             return bool(
                 (os.getenv("ASKNEWS_CLIENT_ID") and os.getenv("ASKNEWS_SECRET"))
                 or os.getenv("ASKNEWS_API_KEY")
@@ -234,12 +209,13 @@ class ForecasterBot(ForecastBot):
         return False
 
     async def _provider(self, name: str, question: MetaculusQuestion, prompt: str) -> str:
-        """Roda um provedor de pesquisa distinto e devolve o texto."""
+        """Runs one additional research provider and returns its text."""
         if name == "asknews":
             from forecasting_tools import AskNewsSearcher
 
-            # A versao _async: get_formatted_news e sincrono e devolve str,
-            # e "await" numa str quebra (o provedor falharia sempre, calado).
+            # The _async variant: get_formatted_news is synchronous and returns
+            # a str, so awaiting it fails (silently, since provider errors are
+            # caught in run_research).
             return await AskNewsSearcher().get_formatted_news_async(question.question_text)
         if name == "exa":
             from forecasting_tools import SmartSearcher
@@ -250,12 +226,12 @@ class ForecasterBot(ForecastBot):
         if name == "perplexity":
             return await GeneralLlm(model="perplexity/sonar-pro", temperature=0.1).invoke(prompt)
         if name == "anthropic-search":
-            # Raciocinio baixo: e busca, nao decisao. E medido em 2026-09-22:
-            # sem o parametro, US$ 0,75 por chamada em tokens (media de 3); com
-            # "low", US$ 0,14. Com raciocinio ligado o Claude puxa ~4x menos
-            # conteudo de busca. Sem ele, uma chamada passou de 200 mil tokens
-            # de entrada e caiu na tarifa de contexto longo (preco dobra).
-            # Rende ~60% do texto por um quinto do preco.
+            # Low reasoning on purpose. Measured 2026-09-22: without the
+            # parameter a call cost $0.75 in tokens (mean of 3) against $0.14
+            # with "low", because reasoning makes Claude pull about 4x less
+            # search content; one call went past 200k input tokens and was
+            # billed at the long-context rate. "low" yields ~60% of the text
+            # for a fifth of the price.
             return await GeneralLlm(
                 model="openrouter/anthropic/claude-sonnet-4.6:online",
                 temperature=0.1, timeout=180, reasoning_effort="low",
@@ -263,7 +239,7 @@ class ForecasterBot(ForecastBot):
         return ""
 
     # ------------------------------------------------------------------
-    # PESQUISA
+    # RESEARCH
     # ------------------------------------------------------------------
 
     _META_RE = re.compile(
@@ -274,30 +250,24 @@ class ForecasterBot(ForecastBot):
 
     def _meta_question_block(self, question: MetaculusQuestion) -> str:
         """
-        Instrucao extra para as meta-perguntas do MiniBench.
+        Extra research instruction for MiniBench meta-questions ("will the
+        community prediction be above X% on date D for question Q?").
 
-        Muitas perguntas do MiniBench tem a forma "a previsao da comunidade
-        vai estar acima de X% na data D para a pergunta Q?". Jeff Mohl (bot
-        Delphi) perdeu suas TRES piores pontuacoes de uma rodada porque a
-        busca web alucinou o valor atual da comunidade (leu 42% quando era
-        35%, 75% quando era 90%) e o resto do raciocinio herdou o erro.
-
-        A correcao ideal seria ler o numero direto da API. Testado em
-        2026-09-19: o token de bot NAO enxerga a previsao da comunidade em
-        perguntas que ele nao previu (0 de 6 perguntas abertas). Isso exige o
-        "Bot Benchmarking Access Tier" da Metaculus. Enquanto ele nao chega,
-        o melhor que da para fazer e obrigar a busca a ir na pagina exata e
-        declarar a incerteza em vez de inventar.
+        Web search tends to hallucinate the current community value, and the
+        whole forecast inherits that wrong anchor. Reading it from the API
+        would be better, but a bot token cannot see the community prediction
+        on questions it has not forecast (tested 2026-09-19), so the research
+        is told to read the exact page or report the value as unknown.
         """
         text = question.question_text or ""
         m = self._META_RE.search(text)
         if not m:
             return ""
-        direcao, limiar = m.group(1), m.group(2)
+        direction, threshold = m.group(1), m.group(2)
         return clean_indents(
             f"""
             (g) THIS IS A META-QUESTION about another Metaculus question's
-                community prediction, with threshold {limiar}% ({direcao}).
+                community prediction, with threshold {threshold}% ({direction}).
                 Your single most important job is the CURRENT value of that
                 community prediction. Open the referenced Metaculus question
                 page itself and read the number shown there. Report it as
@@ -347,13 +317,9 @@ class ForecasterBot(ForecastBot):
                 """
             )
 
-            # Diversidade de PROVEDORES, nao so de consultas. O achado da
-            # Metaculus: numero de fontes distintas r=+0,42, e "nenhum provedor
-            # e bom por si". Entao a pesquisa compartilhada roda em paralelo o
-            # provedor primario mais um segundo provedor DISTINTO, e concatena
-            # os dois com rotulo. Cada bloco vira uma fonte independente que o
-            # forecaster confronta. Os provedores extras degradam sozinhos: sem
-            # chave, aquele bloco simplesmente nao aparece.
+            # The primary research model and every extra provider run in
+            # parallel; each result becomes a labeled source block. A provider
+            # that fails or has no key is simply left out.
             async def primary() -> str:
                 r = self.get_llm("researcher")
                 if isinstance(r, GeneralLlm):
@@ -362,21 +328,21 @@ class ForecasterBot(ForecastBot):
                     return ""
                 return await self.get_llm("researcher", "llm").invoke(prompt)
 
-            blocos = await asyncio.gather(
+            blocks = await asyncio.gather(
                 primary(),
                 *(self._provider(name, question, prompt) for name in self._research_providers),
                 return_exceptions=True,
             )
-            partes = []
-            rotulos = ["Primary web research"] + list(self._research_providers)
-            for rotulo, b in zip(rotulos, blocos):
+            parts = []
+            labels = ["Primary web research"] + list(self._research_providers)
+            for label, b in zip(labels, blocks):
                 if isinstance(b, Exception):
-                    logger.warning(f"Provedor de pesquisa {rotulo} falhou: {type(b).__name__}: {b}")
+                    logger.warning(f"Research provider {label} failed: {type(b).__name__}: {b}")
                     continue
                 if b and b.strip():
-                    partes.append(f"## Source: {rotulo}\n{b.strip()}")
-            research = "\n\n".join(partes)
-            logger.info(f"Pesquisa para {question.page_url} ({len(partes)} fontes):\n{research}")
+                    parts.append(f"## Source: {label}\n{b.strip()}")
+            research = "\n\n".join(parts)
+            logger.info(f"Research for {question.page_url} ({len(parts)} sources):\n{research}")
             return research
 
     # ------------------------------------------------------------------
@@ -429,7 +395,7 @@ class ForecasterBot(ForecastBot):
         return answers
 
     # ------------------------------------------------------------------
-    # BINARIA
+    # BINARY
     # ------------------------------------------------------------------
 
     async def _run_forecast_on_binary(
@@ -521,27 +487,23 @@ class ForecasterBot(ForecastBot):
             model=self.get_llm("parser", "llm"),
             num_validation_samples=self._structure_output_validation_samples,
         )
-        valor = parsed.prediction_in_decimal
+        value = parsed.prediction_in_decimal
 
-        # Alarme de 50% exato.
-        #
-        # Um participante da Spring 2026 perdeu a temporada inteira porque o
-        # bot caiu num fallback silencioso e passou a enviar 0,5 em tudo. 50%
-        # cravado quase nunca e uma conclusao de raciocinio, quase sempre e
-        # parser falhando ou modelo se recusando a responder. Nao da para
-        # corrigir automaticamente sem inventar numero, entao grita no log.
-        if valor == 0.5:
+        # An exact 50% is almost never a reasoned conclusion; it usually means
+        # the parser failed or the model refused to answer. It cannot be fixed
+        # without inventing a number, so it is flagged loudly in the log.
+        if value == 0.5:
             logger.warning(
-                "PREVISAO EXATAMENTE 50%. Verifique se o parser leu o texto ou "
-                "se o modelo se recusou a responder. Trecho do raciocinio: "
+                "FORECAST OF EXACTLY 50%. Check whether the parser read the text "
+                "or the model refused to answer. Reasoning excerpt: "
                 f"{reasoning[:200]!r}"
             )
 
-        # Metaculus nao aceita 0% nem 100%. A calibracao entra depois.
-        return max(0.01, min(0.99, valor))
+        # Metaculus rejects 0% and 100%. Calibration is applied later.
+        return max(0.01, min(0.99, value))
 
     # ------------------------------------------------------------------
-    # MULTIPLA ESCOLHA
+    # MULTIPLE CHOICE
     # ------------------------------------------------------------------
 
     async def _run_forecast_on_multiple_choice(
@@ -628,7 +590,7 @@ class ForecasterBot(ForecastBot):
         return ReasonedPrediction(prediction_value=combined, reasoning=f"{summary}\n\n{details}")
 
     # ------------------------------------------------------------------
-    # NUMERICA
+    # NUMERIC AND DISCRETE
     # ------------------------------------------------------------------
 
     async def _run_forecast_on_numeric(
@@ -774,22 +736,20 @@ class ForecasterBot(ForecastBot):
         return upper_msg, lower_msg
 
     # ------------------------------------------------------------------
-    # AGREGACAO + CALIBRACAO
+    # AGGREGATION AND CALIBRATION
     # ------------------------------------------------------------------
 
     async def _aggregate_predictions(self, predictions, question):
         """
-        Agrega pela logica da classe pai e aplica Platt scaling em cima.
-
-        A calibracao tem que vir DEPOIS da agregacao: corrigir cada amostra
-        antes de juntar distorce a dispersao entre amostras, que e justamente
-        o sinal que a agregacao usa.
+        Aggregates with the parent class logic, then applies Platt scaling to
+        binary forecasts. Calibration comes after aggregation so it corrects
+        the final number rather than distorting the spread between samples.
         """
         aggregate = await super()._aggregate_predictions(predictions, question)
 
         if isinstance(aggregate, float) and (self._cal_a, self._cal_b) != (1.0, 0.0):
             calibrated = apply_platt(aggregate, self._cal_a, self._cal_b)
-            logger.info(f"Calibracao: {aggregate:.4f} -> {calibrated:.4f}")
+            logger.info(f"Calibration: {aggregate:.4f} -> {calibrated:.4f}")
             return calibrated
 
         return aggregate

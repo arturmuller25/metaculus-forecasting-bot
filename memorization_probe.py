@@ -1,23 +1,22 @@
 """
-Sonda de memorização: os modelos do bot decoraram as perguntas de 2025?
+Memorization probe: have the bot's models memorized the 2025 questions?
 
-Motivo: o usuário quer usar perguntas já resolvidas para testar e calibrar
-o bot. Isso só vale se o modelo NÃO souber o resultado por memória. Em vez
-de assumir, medimos.
+Resolved questions are only valid for testing and calibrating the bot if the
+model does not already know the outcome from memory. This measures it.
 
-Duas sondas por modelo, sem busca web (modelos sem :online não têm ferramenta):
+Two probes per model, no web search (models without the :online suffix have no web tool):
 
-  A. RECALL  - pergunta direto se o modelo lembra da resolução.
-  B. BLIND   - pede previsão "como se fosse a data de publicação".
+  A. RECALL  - asks directly whether the model remembers the resolution.
+  B. BLIND   - asks for a forecast "as of the publication date".
 
-Comparações:
-  - Brier da previsão às cegas vs Brier da mediana dos profissionais
-    (que tinham pesquisa mas não tinham o futuro) nas MESMAS perguntas.
-  - Acurácia do recall explícito vs taxa-base.
+Comparisons:
+  - Brier of the blind forecast vs Brier of the pro median on the SAME
+    questions (pros had research but no hindsight).
+  - Accuracy of explicit recall vs the base rate.
 
-Se um modelo de 2026 bate os profissionais às cegas em perguntas de
-jan-abr/2025, é memória, e o conjunto não serve para calibrar.
-Uso: uv run python probe_memorizacao.py [n_perguntas]
+If a 2026 model beats the pros blind on Jan-Apr 2025 questions, that is
+memorization and the set is unfit for calibration.
+Usage: uv run python memorization_probe.py [n_questions]
 """
 
 from __future__ import annotations
@@ -52,7 +51,7 @@ N = int(sys.argv[1]) if len(sys.argv) > 1 else 30
 
 
 def load_questions():
-    """Perguntas binárias resolvidas + mediana dos profissionais (último palpite de cada)."""
+    """Resolved binary questions plus the pro median (latest forecast of each pro)."""
     rows = list(csv.DictReader(io.open(PRO_CSV, encoding="utf-8")))
     by_q = defaultdict(list)
     for r in rows:
@@ -62,7 +61,7 @@ def load_questions():
     out = []
     for qid, rs in by_q.items():
         last = {}
-        for r in rs:  # último palpite de cada profissional
+        for r in rs:  # latest forecast of each pro
             f = r["forecaster"]
             if f not in last or r["created_at"] > last[f]["created_at"]:
                 last[f] = r
@@ -114,7 +113,7 @@ async def ask(llm, prompt, retries=2):
             return await llm.invoke(prompt)
         except Exception as e:
             if i == retries:
-                return f"ERRO: {type(e).__name__}"
+                return f"ERROR: {type(e).__name__}"
             await asyncio.sleep(3)
 
 
@@ -142,9 +141,9 @@ def brier(pairs):
 
 async def main():
     qs = load_questions()[:N]
-    print(f"{len(qs)} perguntas binárias do Q1 2025 com mediana de profissionais")
+    print(f"{len(qs)} binary questions from Q1 2025 with a pro median")
     base = sum(q["y"] for q in qs) / len(qs)
-    print(f"taxa-base de Sim nesta amostra: {base:.0%}\n")
+    print(f"base rate of Yes in this sample: {base:.0%}\n")
 
     results = {name: {"recall": [], "blind": []} for name in MODELS}
     sem = asyncio.Semaphore(4)
@@ -160,10 +159,10 @@ async def main():
     tasks = [run_one(n, m, q) for n, m in MODELS.items() for q in qs]
     t0 = datetime.now()
     await asyncio.gather(*tasks)
-    print(f"tempo: {(datetime.now()-t0).seconds}s\n")
+    print(f"elapsed: {(datetime.now()-t0).seconds}s\n")
 
     pro_pairs = [(q["pro_median"], q["y"]) for q in qs]
-    print(f"{'modelo':12s} {'recall=sim':>10s} {'acerto recall':>13s} {'Brier cego':>10s} {'Brier pros':>10s} {'const 35%':>10s}")
+    print(f"{'model':12s} {'recall=yes':>10s} {'recall acc':>13s} {'Brier LLM':>10s} {'Brier pros':>10s} {'const 35%':>10s}")
     for name in MODELS:
         rec = results[name]["recall"]
         said_yes = [(q, o, c) for q, (r, o, c), _ in rec if r == "yes"]
@@ -178,7 +177,7 @@ async def main():
             f"{brier(blind):>10.3f} {brier(pro_pairs):>10.3f} {brier([(0.35, q['y']) for q in qs]):>10.3f}"
         )
 
-    # salva tudo para inspeção
+    # save everything for inspection
     dump = {
         name: {
             "recall": [{"id": q["id"], "title": q["title"], "y": q["y"], "parsed": pr, "raw": raw[:600]} for q, pr, raw in results[name]["recall"]],
@@ -186,16 +185,16 @@ async def main():
         }
         for name in MODELS
     }
-    io.open("logs/probe_memorizacao.json", "w", encoding="utf-8").write(json.dumps(dump, ensure_ascii=False, indent=1))
-    print("\ndetalhe em logs/probe_memorizacao.json")
+    io.open("logs/memorization_probe.json", "w", encoding="utf-8").write(json.dumps(dump, ensure_ascii=False, indent=1))
+    print("\ndetails in logs/memorization_probe.json")
 
-    # exemplos de recall explícito
+    # examples of explicit recall
     for name in MODELS:
         ex = [(q, o, c) for q, (r, o, c), _ in results[name]["recall"] if r == "yes"][:3]
         if ex:
-            print(f"\n{name} diz que LEMBRA de, por exemplo:")
+            print(f"\n{name} claims to REMEMBER, for example:")
             for q, o, c in ex:
-                ok = "certo" if o == ("yes" if q["y"] else "no") else "ERRADO"
+                ok = "correct" if o == ("yes" if q["y"] else "no") else "WRONG"
                 print(f"  [{ok}] conf {c}: {q['title'][:90]}")
 
 
