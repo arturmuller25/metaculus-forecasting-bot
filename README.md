@@ -13,10 +13,10 @@ skipped):
 
 1. **Research.** Several independent search providers run in parallel and
    their results are combined into one briefing, each block labeled with its
-   source: GPT-5.4 web search, Claude web search, and AskNews, Exa or
-   Perplexity when their API keys are set.
-2. **Forecast.** Two models from different families (GPT-5.4 and Claude
-   Sonnet 4.6) forecast every question from the same briefing. Binary
+   source: GPT-5.6 Sol web search, Claude Sonnet 5 web search, and AskNews,
+   Exa or Perplexity when their API keys are set.
+2. **Forecast.** Two models from different families (GPT-5.6 Sol and Claude
+   Sonnet 5) forecast every question from the same briefing. Binary
    probabilities are averaged, multiple-choice probabilities are averaged per
    option, and numeric and discrete distributions are combined by the
    pointwise median of their CDFs.
@@ -79,14 +79,14 @@ All optional; defaults live in `main.py`. See `.env.example`.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `FORECAST_MODEL` | `openrouter/openai/gpt-5.4` | main forecasting model |
-| `RESEARCH_MODEL` | `openrouter/openai/gpt-5.4:online` | primary research model (web search) |
+| `FORECAST_MODEL` | `openrouter/openai/gpt-5.6-sol` | forecasting model when the ensemble is off |
+| `RESEARCH_MODEL` | `openrouter/openai/gpt-5.6-sol:online` | primary research model (web search) |
 | `PARSER_MODEL` | `openrouter/openai/gpt-4o-mini` | extracts structured values from model output |
 | `REASONING_EFFORT` | `high` | reasoning effort for forecasting models |
 | `RESEARCH_REASONING` | `low` | reasoning effort for research calls |
-| `ENSEMBLE_MODELS` | GPT-5.4, Claude Sonnet 4.6 | comma-separated ensemble |
+| `ENSEMBLE_MODELS` | GPT-5.6 Sol, Claude Sonnet 5 | comma-separated ensemble |
 | `ENSEMBLE` | on | `0` disables the ensemble |
-| `SHADOW_MODELS` | none | models that forecast every question but are only recorded, never published, e.g. `openrouter/openai/gpt-5.4@medium` |
+| `SHADOW_MODELS` | none | models that forecast every question but are only recorded, never published, as `model[@effort]`, e.g. `openrouter/openai/gpt-5.4` |
 | `RESEARCH_PROVIDERS` | auto | force a provider list, e.g. `asknews,anthropic-search` |
 | `MAX_COST_PER_RUN` | `5.00` | cost cap per run in USD (web search cost is not tracked) |
 | `CALIBRATION_A`, `CALIBRATION_B` | `1.0`, `0.0` | Platt scaling coefficients |

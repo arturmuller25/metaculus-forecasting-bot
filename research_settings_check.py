@@ -38,7 +38,7 @@ from main import RESEARCH_MODEL, build_bot, openrouter_usage  # noqa: E402
 
 N_QUESTIONS = 3
 BUDGET = 4.00  # USD in tokens; above it, the remaining "high" calls are skipped
-CLAUDE = "openrouter/anthropic/claude-sonnet-4.6:online"
+CLAUDE = "openrouter/anthropic/claude-sonnet-5:online"
 CONFIGS = [  # label, model, reasoning effort (None = parameter not sent)
     ("claude-none", CLAUDE, None),
     ("claude-low", CLAUDE, "low"),

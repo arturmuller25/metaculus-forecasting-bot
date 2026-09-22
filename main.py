@@ -54,8 +54,11 @@ _HAS_OPENROUTER = bool(os.getenv("OPENROUTER_API_KEY"))
 if _HAS_OPENROUTER:
     # GPT-5.x as the final forecaster is the strongest signal repeated across
     # the last two tournament seasons (r=+0.42 in Metaculus's analysis).
-    _FORECAST = "openrouter/openai/gpt-5.4"
-    _RESEARCH = "openrouter/openai/gpt-5.4:online"
+    # GPT-5.6 Sol and Claude Sonnet 5 replaced gpt-5.4 and claude-sonnet-4.6
+    # on 2026-09-22: newer, and cheaper per token. gpt-5.4 keeps running as a
+    # shadow model (SHADOW_MODELS) to catch a regression.
+    _FORECAST = "openrouter/openai/gpt-5.6-sol"
+    _RESEARCH = "openrouter/openai/gpt-5.6-sol:online"
     _PARSER = "openrouter/openai/gpt-4o-mini"
     # No Google model: this key has no usable Gemini quota (checked
     # 2026-09-18: zero quota for gemini-3.1-pro, 20 requests/min for
@@ -66,8 +69,8 @@ if _HAS_OPENROUTER:
     # research providers; with a web search per member, one question cost
     # $4.38 (measured 2026-09-22) and the members repeated the same engines.
     _ENSEMBLE = [
-        "openrouter/openai/gpt-5.4",
-        "openrouter/anthropic/claude-sonnet-4.6",
+        "openrouter/openai/gpt-5.6-sol",
+        "openrouter/anthropic/claude-sonnet-5",
     ]
 else:
     _FORECAST = "metaculus/claude-sonnet-4-5"
@@ -92,8 +95,8 @@ MAX_COST_PER_RUN = float(os.getenv("MAX_COST_PER_RUN", "5.00"))
 # (p=0.004). The parser takes no reasoning parameter.
 REASONING_EFFORT = os.getenv("REASONING_EFFORT", "high").strip()
 # Research uses low effort. Measured 2026-09-22 with research_settings_check.py
-# on 3 questions: low, medium and high cost $0.30, $0.49 and $0.59 per call in
-# tokens, and higher effort did not return richer research.
+# on 3 questions (gpt-5.4): low, medium and high cost $0.30, $0.49 and $0.59
+# per call in tokens, and higher effort did not return richer research.
 RESEARCH_REASONING = os.getenv("RESEARCH_REASONING", "low").strip()
 
 

@@ -221,19 +221,19 @@ class ForecasterBot(ForecastBot):
             from forecasting_tools import SmartSearcher
 
             return await SmartSearcher(
-                model="openrouter/openai/gpt-5.4", num_searches_to_run=2, num_sites_per_search=8
+                model="openrouter/openai/gpt-5.6-sol", num_searches_to_run=2, num_sites_per_search=8
             ).invoke(prompt)
         if name == "perplexity":
             return await GeneralLlm(model="perplexity/sonar-pro", temperature=0.1).invoke(prompt)
         if name == "anthropic-search":
-            # Low reasoning on purpose. Measured 2026-09-22: without the
-            # parameter a call cost $0.75 in tokens (mean of 3) against $0.14
-            # with "low", because reasoning makes Claude pull about 4x less
-            # search content; one call went past 200k input tokens and was
-            # billed at the long-context rate. "low" yields ~60% of the text
-            # for a fifth of the price.
+            # Low reasoning on purpose. Measured 2026-09-22 on Sonnet 4.6:
+            # without the parameter a call cost $0.75 in tokens (mean of 3)
+            # against $0.14 with "low", because reasoning makes Claude pull
+            # about 4x less search content; one call went past 200k input
+            # tokens and was billed at the long-context rate. "low" yielded
+            # ~60% of the text for a fifth of the price.
             return await GeneralLlm(
-                model="openrouter/anthropic/claude-sonnet-4.6:online",
+                model="openrouter/anthropic/claude-sonnet-5:online",
                 temperature=0.1, timeout=180, reasoning_effort="low",
             ).invoke(prompt)
         return ""
