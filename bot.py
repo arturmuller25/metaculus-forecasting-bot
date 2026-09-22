@@ -151,7 +151,9 @@ class ForecasterBot(ForecastBot):
         if name == "asknews":
             from forecasting_tools import AskNewsSearcher
 
-            return await AskNewsSearcher().get_formatted_news(question.question_text)
+            # A versao _async: get_formatted_news e sincrono e devolve str,
+            # e "await" numa str quebra (o provedor falharia sempre, calado).
+            return await AskNewsSearcher().get_formatted_news_async(question.question_text)
         if name == "exa":
             from forecasting_tools import SmartSearcher
 
