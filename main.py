@@ -112,6 +112,23 @@ PARSER_MODEL = os.getenv("PARSER_MODEL", _PARSER)
 # Teto de gasto por execucao, em dolares. O processo aborta ao estourar.
 MAX_COST_PER_RUN = float(os.getenv("MAX_COST_PER_RUN", "5.00"))
 
+# Esforco de raciocinio dos modelos que pensam (decisor, pesquisador, ensemble).
+# "high" e o achado mais forte de todo o material: nos pares "high" contra
+# "low" da Metaculus, o high venceu 8 de 8 vezes (p=0,004), um dos poucos
+# resultados que sobrevive a correcao de comparacoes multiplas. Custa mais
+# tokens de raciocinio, entao fica configuravel: REASONING_EFFORT=medium
+# ou low no .env se o orcamento apertar. O parser (gpt-4o-mini) fica de fora,
+# nao raciocina e nao aceita o parametro.
+REASONING_EFFORT = os.getenv("REASONING_EFFORT", "high").strip()
+
+
+def _thinker(model: str, temperature: float, timeout: int) -> GeneralLlm:
+    """GeneralLlm com esforco de raciocinio, para modelos que pensam."""
+    kwargs = dict(model=model, temperature=temperature, timeout=timeout, allowed_tries=2)
+    if REASONING_EFFORT in ("low", "medium", "high"):
+        kwargs["reasoning_effort"] = REASONING_EFFORT
+    return GeneralLlm(**kwargs)
+
 TOURNAMENT_URLS = {
     "tournament": "https://www.metaculus.com/tournament/fall-futureeval-2026/",
     "minibench": "https://www.metaculus.com/aib/minibench",
@@ -123,8 +140,8 @@ TOURNAMENT_URLS = {
 
 def build_bot(publish: bool, samples: int) -> ForecasterBot:
     llms = {
-        "default": GeneralLlm(model=FORECAST_MODEL, temperature=0.3, timeout=120, allowed_tries=2),
-        "researcher": GeneralLlm(model=RESEARCH_MODEL, temperature=0.1, timeout=180, allowed_tries=2),
+        "default": _thinker(FORECAST_MODEL, 0.3, 120),
+        "researcher": _thinker(RESEARCH_MODEL, 0.1, 180),
         "parser": GeneralLlm(model=PARSER_MODEL, temperature=0.0, timeout=60, allowed_tries=2),
         "summarizer": GeneralLlm(model=PARSER_MODEL, temperature=0.0, timeout=60),
     }
@@ -140,10 +157,7 @@ def build_bot(publish: bool, samples: int) -> ForecasterBot:
     ensemble = (
         []
         if os.getenv("ENSEMBLE", "1") == "0"
-        else [
-            GeneralLlm(model=m, temperature=0.3, timeout=120, allowed_tries=2)
-            for m in _members
-        ]
+        else [_thinker(m, 0.3, 120) for m in _members]
     )
 
     return ForecasterBot(
