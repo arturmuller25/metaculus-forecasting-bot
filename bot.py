@@ -163,7 +163,12 @@ class ForecasterBot(ForecastBot):
         if name == "perplexity":
             return await GeneralLlm(model="perplexity/sonar-pro", temperature=0.1).invoke(prompt)
         if name == "anthropic-search":
-            # Raciocinio baixo: e busca, nao decisao.
+            # Raciocinio baixo: e busca, nao decisao. E medido em 2026-09-22:
+            # sem o parametro, US$ 0,75 por chamada em tokens (media de 3); com
+            # "low", US$ 0,14. Com raciocinio ligado o Claude puxa ~4x menos
+            # conteudo de busca. Sem ele, uma chamada passou de 200 mil tokens
+            # de entrada e caiu na tarifa de contexto longo (preco dobra).
+            # Rende ~60% do texto por um quinto do preco.
             return await GeneralLlm(
                 model="openrouter/anthropic/claude-sonnet-4.6:online",
                 temperature=0.1, timeout=180, reasoning_effort="low",

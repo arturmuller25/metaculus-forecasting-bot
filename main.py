@@ -85,12 +85,13 @@ if _HAS_OPENROUTER:
     # Ensemble SEM :online, e a diversidade vem da PESQUISA, nao de cada
     # membro buscar de novo. Motivo medido em 2026-09-22: com os membros em
     # :online eram 4 buscas por pergunta (2 pesquisa + 2 ensemble) e o custo
-    # real bateu US$ 4,38 numa unica pergunta, insustentavel. O diagnostico
-    # no BTF-3 tambem mostrou que empilhar pesquisa chegou a PIORAR o gpt-5.4
-    # (Brier 0,159 as cegas -> 0,189 com pesquisa). Entao: a pesquisa (com
-    # varios provedores distintos) faz a busca uma vez, e os dois modelos do
-    # ensemble raciocinam sobre esse briefing ja diverso. Diversidade de
-    # familia no ensemble, diversidade de fonte na pesquisa, sem redundancia.
+    # real bateu US$ 4,38 numa unica pergunta, insustentavel. E as buscas
+    # dos membros repetiam os mesmos dois motores que a pesquisa ja usa.
+    # (No BTF-3 o gpt-5.4 foi de 0,159 as cegas para 0,189 com pesquisa, mas
+    # isso e ruido: t=-0,94 em 30 perguntas. Nao conta como evidencia.)
+    # Entao: a pesquisa (com varios provedores distintos) faz a busca uma
+    # vez, e os dois modelos do ensemble raciocinam sobre esse briefing ja
+    # diverso. Diversidade de familia no ensemble, de fonte na pesquisa.
     _ENSEMBLE = [
         "openrouter/openai/gpt-5.4",
         "openrouter/anthropic/claude-sonnet-4.6",
@@ -123,9 +124,14 @@ MAX_COST_PER_RUN = float(os.getenv("MAX_COST_PER_RUN", "5.00"))
 REASONING_EFFORT = os.getenv("REASONING_EFFORT", "high").strip()
 # A pesquisa usa raciocinio BAIXO de proposito. O esforco alto foi medido
 # como valioso na PREVISAO final (8 de 8), nao na coleta de evidencia. E o
-# diagnostico no BTF-3 mostrou que empilhar pesquisa chegou a piorar o
-# gpt-5.4, entao pesquisa cara e contraproducente. Baixo aqui corta gasto
-# sem tocar no que tem evidencia.
+# teste de 2026-09-22 (teste_pesquisa.py, 3 perguntas, mesmo prompt, custo
+# em tokens; as taxas por busca somaram ~US$ 0,13 por chamada em media, nao
+# medidas uma a uma):
+# baixo US$ 0,30 por chamada, medio 0,49, alto 0,59 (alto medido em uma).
+# Medio e alto nao trouxeram pesquisa mais rica: em URLs, dominios e datas o
+# baixo empatou ou venceu, fora 1 URL e 1 dominio a mais do alto numa
+# pergunta. Raciocinio a mais aqui encurta o relatorio e cobra mais.
+# Nao mede acerto (seriam ~2000 perguntas para ver 0,01 de Brier).
 RESEARCH_REASONING = os.getenv("RESEARCH_REASONING", "low").strip()
 
 
