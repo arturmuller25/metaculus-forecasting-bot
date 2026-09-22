@@ -75,6 +75,13 @@ jobs:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           CALIBRATION_A: ${{ vars.CALIBRATION_A }}
           CALIBRATION_B: ${{ vars.CALIBRATION_B }}
+          # Provedores de pesquisa extras. Secret ausente chega vazio e o bot
+          # ignora aquele provedor, entao da para cadastrar so os que tiver.
+          ASKNEWS_API_KEY: ${{ secrets.ASKNEWS_API_KEY }}
+          ASKNEWS_CLIENT_ID: ${{ secrets.ASKNEWS_CLIENT_ID }}
+          ASKNEWS_SECRET: ${{ secrets.ASKNEWS_SECRET }}
+          EXA_API_KEY: ${{ secrets.EXA_API_KEY }}
+          PERPLEXITY_API_KEY: ${{ secrets.PERPLEXITY_API_KEY }}
         run: |
           set -uo pipefail
           if [ "${{ github.event_name }}" = "schedule" ]; then
@@ -92,7 +99,8 @@ jobs:
           ARGS="--mode $MODE"
           if [ "$PUBLISH" = "true" ]; then ARGS="$ARGS --publish"; fi
           # Teste manual limitado a 3 perguntas: prova os tres tipos por
-          # ~US$ 0,40 em vez de rodar as 10 da area de testes por ~US$ 1,30.
+          # ~US$ 1,90 em vez de rodar as 10 da area de testes por ~US$ 6
+          # (medido em 2026-09-22: US$ 0,63 por pergunta).
           if [ "$MODE" = "test" ]; then ARGS="$ARGS --limit 3"; fi
           echo "modo=$MODE publicar=$PUBLISH loop=$LOOP args=[$ARGS]"
 

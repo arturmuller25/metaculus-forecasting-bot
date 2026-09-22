@@ -116,6 +116,58 @@ class ForecasterBot(ForecastBot):
             nomes = ", ".join(llm.model for llm in self._ensemble)
             logger.info(f"Ensemble com {len(self._ensemble)} modelos: {nomes}")
 
+        # Provedores de pesquisa EXTRA (alem do primario). Auto-detecta pelas
+        # chaves presentes, ou RESEARCH_PROVIDERS="asknews,exa" no .env forca.
+        # "anthropic-search" e o segundo backend gratis (busca do Claude via
+        # OpenRouter), diferente da busca do GPT do provedor primario.
+        override = os.getenv("RESEARCH_PROVIDERS", "").strip()
+        if override:
+            wanted = [p.strip().lower() for p in override.split(",") if p.strip()]
+        else:
+            wanted = ["asknews", "exa", "perplexity", "anthropic-search"]
+        # so fica o que tem credencial
+        self._research_providers = [p for p in wanted if self._provider_ready(p)]
+        if self._research_providers:
+            logger.info(f"Provedores de pesquisa extra: {', '.join(self._research_providers)}")
+
+    @staticmethod
+    def _provider_ready(name: str) -> bool:
+        if name == "asknews":
+            # O AskNewsSearcher aceita OAuth (id + secret) ou chave de API.
+            return bool(
+                (os.getenv("ASKNEWS_CLIENT_ID") and os.getenv("ASKNEWS_SECRET"))
+                or os.getenv("ASKNEWS_API_KEY")
+            )
+        if name == "exa":
+            return bool(os.getenv("EXA_API_KEY"))
+        if name == "perplexity":
+            return bool(os.getenv("PERPLEXITY_API_KEY"))
+        if name == "anthropic-search":
+            return bool(os.getenv("OPENROUTER_API_KEY"))
+        return False
+
+    async def _provider(self, name: str, question: MetaculusQuestion, prompt: str) -> str:
+        """Roda um provedor de pesquisa distinto e devolve o texto."""
+        if name == "asknews":
+            from forecasting_tools import AskNewsSearcher
+
+            return await AskNewsSearcher().get_formatted_news(question.question_text)
+        if name == "exa":
+            from forecasting_tools import SmartSearcher
+
+            return await SmartSearcher(
+                model="openrouter/openai/gpt-5.4", num_searches_to_run=2, num_sites_per_search=8
+            ).invoke(prompt)
+        if name == "perplexity":
+            return await GeneralLlm(model="perplexity/sonar-pro", temperature=0.1).invoke(prompt)
+        if name == "anthropic-search":
+            # Raciocinio baixo: e busca, nao decisao.
+            return await GeneralLlm(
+                model="openrouter/anthropic/claude-sonnet-4.6:online",
+                temperature=0.1, timeout=180, reasoning_effort="low",
+            ).invoke(prompt)
+        return ""
+
     # ------------------------------------------------------------------
     # PESQUISA
     # ------------------------------------------------------------------
@@ -201,15 +253,36 @@ class ForecasterBot(ForecastBot):
                 """
             )
 
-            researcher = self.get_llm("researcher")
-            if isinstance(researcher, GeneralLlm):
-                research = await researcher.invoke(prompt)
-            elif not researcher or researcher in ("None", "no_research"):
-                research = ""
-            else:
-                research = await self.get_llm("researcher", "llm").invoke(prompt)
+            # Diversidade de PROVEDORES, nao so de consultas. O achado da
+            # Metaculus: numero de fontes distintas r=+0,42, e "nenhum provedor
+            # e bom por si". Entao a pesquisa compartilhada roda em paralelo o
+            # provedor primario mais um segundo provedor DISTINTO, e concatena
+            # os dois com rotulo. Cada bloco vira uma fonte independente que o
+            # forecaster confronta. Os provedores extras degradam sozinhos: sem
+            # chave, aquele bloco simplesmente nao aparece.
+            async def primary() -> str:
+                r = self.get_llm("researcher")
+                if isinstance(r, GeneralLlm):
+                    return await r.invoke(prompt)
+                if not r or r in ("None", "no_research"):
+                    return ""
+                return await self.get_llm("researcher", "llm").invoke(prompt)
 
-            logger.info(f"Pesquisa para {question.page_url}:\n{research}")
+            blocos = await asyncio.gather(
+                primary(),
+                *(self._provider(name, question, prompt) for name in self._research_providers),
+                return_exceptions=True,
+            )
+            partes = []
+            rotulos = ["Primary web research"] + list(self._research_providers)
+            for rotulo, b in zip(rotulos, blocos):
+                if isinstance(b, Exception):
+                    logger.warning(f"Provedor de pesquisa {rotulo} falhou: {type(b).__name__}: {b}")
+                    continue
+                if b and b.strip():
+                    partes.append(f"## Source: {rotulo}\n{b.strip()}")
+            research = "\n\n".join(partes)
+            logger.info(f"Pesquisa para {question.page_url} ({len(partes)} fontes):\n{research}")
             return research
 
     # ------------------------------------------------------------------

@@ -82,17 +82,18 @@ if _HAS_OPENROUTER:
     # Duas familias ja e heterogeneo. Se a Metaculus liberar cota do Google,
     # e so acrescentar aqui e testar de novo.
     #
-    # Sufixo :online nos membros do ensemble, de proposito. Sem ele os dois
-    # modelos leem o MESMO briefing de pesquisa e a diversidade que o
-    # ensemble compra some. Jan Flatley-Feldman, dono do melhor bot open
-    # source de duas temporadas, escreveu: "the worst misses come with all
-    # three models agreeing on a shared briefing". Com :online cada membro
-    # busca por conta propria, alem de ler o briefing compartilhado. E a
-    # receita que a xAI usou para chegar a paridade com superforecasters no
-    # ForecastBench: dar busca ao modelo e tirar a media de varias rodadas.
+    # Ensemble SEM :online, e a diversidade vem da PESQUISA, nao de cada
+    # membro buscar de novo. Motivo medido em 2026-09-22: com os membros em
+    # :online eram 4 buscas por pergunta (2 pesquisa + 2 ensemble) e o custo
+    # real bateu US$ 4,38 numa unica pergunta, insustentavel. O diagnostico
+    # no BTF-3 tambem mostrou que empilhar pesquisa chegou a PIORAR o gpt-5.4
+    # (Brier 0,159 as cegas -> 0,189 com pesquisa). Entao: a pesquisa (com
+    # varios provedores distintos) faz a busca uma vez, e os dois modelos do
+    # ensemble raciocinam sobre esse briefing ja diverso. Diversidade de
+    # familia no ensemble, diversidade de fonte na pesquisa, sem redundancia.
     _ENSEMBLE = [
-        "openrouter/openai/gpt-5.4:online",
-        "openrouter/anthropic/claude-sonnet-4.6:online",
+        "openrouter/openai/gpt-5.4",
+        "openrouter/anthropic/claude-sonnet-4.6",
     ]
 else:
     _FORECAST = "metaculus/claude-sonnet-4-5"
@@ -120,13 +121,20 @@ MAX_COST_PER_RUN = float(os.getenv("MAX_COST_PER_RUN", "5.00"))
 # ou low no .env se o orcamento apertar. O parser (gpt-4o-mini) fica de fora,
 # nao raciocina e nao aceita o parametro.
 REASONING_EFFORT = os.getenv("REASONING_EFFORT", "high").strip()
+# A pesquisa usa raciocinio BAIXO de proposito. O esforco alto foi medido
+# como valioso na PREVISAO final (8 de 8), nao na coleta de evidencia. E o
+# diagnostico no BTF-3 mostrou que empilhar pesquisa chegou a piorar o
+# gpt-5.4, entao pesquisa cara e contraproducente. Baixo aqui corta gasto
+# sem tocar no que tem evidencia.
+RESEARCH_REASONING = os.getenv("RESEARCH_REASONING", "low").strip()
 
 
-def _thinker(model: str, temperature: float, timeout: int) -> GeneralLlm:
+def _thinker(model: str, temperature: float, timeout: int, effort: str | None = None) -> GeneralLlm:
     """GeneralLlm com esforco de raciocinio, para modelos que pensam."""
+    effort = REASONING_EFFORT if effort is None else effort
     kwargs = dict(model=model, temperature=temperature, timeout=timeout, allowed_tries=2)
-    if REASONING_EFFORT in ("low", "medium", "high"):
-        kwargs["reasoning_effort"] = REASONING_EFFORT
+    if effort in ("low", "medium", "high"):
+        kwargs["reasoning_effort"] = effort
     return GeneralLlm(**kwargs)
 
 TOURNAMENT_URLS = {
@@ -141,7 +149,7 @@ TOURNAMENT_URLS = {
 def build_bot(publish: bool, samples: int) -> ForecasterBot:
     llms = {
         "default": _thinker(FORECAST_MODEL, 0.3, 120),
-        "researcher": _thinker(RESEARCH_MODEL, 0.1, 180),
+        "researcher": _thinker(RESEARCH_MODEL, 0.1, 180, effort=RESEARCH_REASONING),
         "parser": GeneralLlm(model=PARSER_MODEL, temperature=0.0, timeout=60, allowed_tries=2),
         "summarizer": GeneralLlm(model=PARSER_MODEL, temperature=0.0, timeout=60),
     }
