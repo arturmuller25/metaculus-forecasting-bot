@@ -141,6 +141,7 @@ These spend API credits and publish nothing.
 | `main.py` | command line, model configuration, tournament selection, cost reporting |
 | `calibration.py` | Platt scaling and coefficient fitting |
 | `analyze_results.py` | scores resolved forecasts, overall and per model |
+| `coverage_check.py` | lists recently closed questions the bot did not forecast (runs at the end of each Actions run) |
 | `.github/workflows/forecast.yml` | scheduled runs |
 
 ## License

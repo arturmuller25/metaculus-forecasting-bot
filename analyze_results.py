@@ -76,6 +76,21 @@ def bot_posts(user_id: int, statuses: str | list[str]) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 
+def bot_comment_text(post_id: int, user_id: int) -> str:
+    """
+    Full text of the bot's comment on a post. Bot comments older than 30 days
+    and longer than 1,000 characters are archived: the list endpoint returns
+    only the first 200 characters, so those are fetched one by one.
+    """
+    results = get("/comments/", post=post_id, author=user_id, is_private="true", limit=5)["results"]
+    if not results:
+        return ""
+    comment = results[0]
+    if comment.get("is_text_archived"):
+        comment = get(f"/comments/{comment['id']}/")
+    return comment.get("text") or ""
+
+
 def members_from_comment(text: str, question: dict) -> dict[str, object]:
     """Parses the per-model lines the bot writes into its comment."""
     found: dict[str, object] = {}
@@ -228,8 +243,7 @@ def main() -> None:
         for name, value in ((question.get("my_forecasts") or {}).get("score_data") or {}).items():
             if isinstance(value, (int, float)):
                 scores.setdefault(name, []).append(value)
-        comments = get("/comments/", post=post["id"], author=me, is_private="true", limit=5)["results"]
-        members = members_from_comment(comments[0]["text"], question) if comments else {}
+        members = members_from_comment(bot_comment_text(post["id"], me), question)
         for (post_id, model), row in shadows.items():
             if post_id == post["id"] and model.startswith("shadow:"):
                 members[model] = row["forecast"]
@@ -280,8 +294,7 @@ def main() -> None:
         print("\nUnresolved questions, parsed from the bot's comments:")
         for post in bot_posts(me, ["closed", "open"]):
             question = get(f"/posts/{post['id']}/")["question"]
-            comments = get("/comments/", post=post["id"], author=me, is_private="true", limit=5)["results"]
-            members = members_from_comment(comments[0]["text"], question) if comments else {}
+            members = members_from_comment(bot_comment_text(post["id"], me), question)
             final = published(question)
             shown = {m: (round(v, 3) if isinstance(v, float) else v) for m, v in members.items()}
             print(f"  {post['id']} {question['type'][:8]:8s} published={final if not isinstance(final, float) else round(final, 3)} members={shown}")

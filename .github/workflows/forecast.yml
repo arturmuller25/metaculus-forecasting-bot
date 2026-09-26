@@ -110,6 +110,12 @@ jobs:
             sleep $PAUSE
           done
 
+      - name: Check for missed questions
+        if: always()
+        env:
+          METACULUS_TOKEN: ${{ secrets.METACULUS_TOKEN }}
+        run: uv run python coverage_check.py --hours 6 || echo "coverage check failed, ignoring"
+
       - name: Keep reports
         if: always()
         uses: actions/upload-artifact@v4
