@@ -126,6 +126,28 @@ def _align_options(parsed: PredictedOptionList, options: list[str]) -> Predicted
     )
 
 
+async def _asknews_latest(searcher: Any, query: str) -> str:
+    """AskNews latest-news search only (1 call), formatted like AskNewsSearcher's full search."""
+    from asknews_sdk import AsyncAskNewsSDK
+
+    async with AsyncAskNewsSDK(
+        client_id=searcher.client_id,
+        client_secret=searcher.client_secret,
+        api_key=searcher.api_key,
+        scopes={"news"},
+    ) as ask:
+        response = await ask.news.search_news(
+            query=query,
+            n_articles=6,
+            return_type="both",
+            strategy="latest news",
+            try_cache="1h",
+        )
+    articles = response.as_dicts
+    header = "Here are the relevant news articles:\n\n"
+    return header + (searcher._format_articles(articles) if articles else "No articles were found.\n\n")
+
+
 def _fmt_num(value: float) -> str:
     return f"{value:,.0f}" if abs(value) >= 1000 else f"{value:.4g}"
 
@@ -213,10 +235,18 @@ class ForecasterBot(ForecastBot):
         if name == "asknews":
             from forecasting_tools import AskNewsSearcher
 
+            searcher = AskNewsSearcher()
+            # Call budget: the sponsored plan allows 1,000 calls a month and the
+            # full search costs 6 (latest news 1, the 160-day archive 5), which
+            # the Fall plus MiniBench volume would exceed. MiniBench questions
+            # resolve within days, so they get the latest news only; the
+            # seasonal tournament keeps both searches.
+            if any("minibench" in slug for slug in question.tournament_slugs or []):
+                return await _asknews_latest(searcher, question.question_text)
             # The _async variant: get_formatted_news is synchronous and returns
             # a str, so awaiting it fails (silently, since provider errors are
             # caught in run_research).
-            return await AskNewsSearcher().get_formatted_news_async(question.question_text)
+            return await searcher.get_formatted_news_async(question.question_text)
         if name == "exa":
             from forecasting_tools import SmartSearcher
 
