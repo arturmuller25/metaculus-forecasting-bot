@@ -113,15 +113,28 @@ forecast and each model separately (Brier for binary and multiple choice,
 10th-90th percentile coverage for numeric), shows the Metaculus scores, and
 writes `logs/calibration.csv`.
 
+```bash
+uv run python numeric_replay.py         # resolved numeric and discrete questions
+uv run python numeric_replay.py --all   # also open and closed ones: rebuild check only
+```
+
+It rebuilds the published numeric CDFs from the recorded percentiles with
+the library's linear interpolation and with the alternatives in
+`numeric_cdf.py` (monotone cubic PCHIP, percentiles stretched from the
+median), checks that the linear rebuild matches what was published, and
+scores each alternative against linear at the outcome.
+
 ## Calibration
 
 ```bash
-uv run python calibration.py logs/calibration.csv
+uv run python calibration.py logs/calibration.csv [--since YYYY-MM-DD]
 ```
 
 It fits the Platt coefficients and recommends them only when they beat the
-raw forecasts in leave-one-out cross-validation. It needs at least 20 resolved
-binary questions, and around 100 to detect a real miscalibration.
+raw forecasts in two held-out tests: leave-one-out, and a fit on the older
+questions scored on the newest 30%. It needs at least 30 resolved binary
+questions, and around 100 to detect a real miscalibration. `--since` keeps
+only forecasts made after a date, such as the last change of models.
 
 ## Evaluation scripts
 
@@ -140,7 +153,9 @@ These spend API credits and publish nothing.
 | `bot.py` | the bot: research, forecasting for each question type, aggregation |
 | `main.py` | command line, model configuration, tournament selection, cost reporting |
 | `calibration.py` | Platt scaling and coefficient fitting |
+| `numeric_cdf.py` | alternative ways to build a numeric CDF from percentiles |
 | `analyze_results.py` | scores resolved forecasts, overall and per model |
+| `numeric_replay.py` | compares the numeric CDF constructions on the bot's own questions |
 | `coverage_check.py` | lists recently closed questions the bot did not forecast (runs at the end of each Actions run) |
 | `.github/workflows/forecast.yml` | scheduled runs |
 

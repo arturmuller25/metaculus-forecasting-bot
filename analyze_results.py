@@ -29,6 +29,7 @@ import statistics
 import subprocess
 import sys
 import time
+from datetime import datetime, timezone
 
 import dotenv
 import requests
@@ -251,7 +252,11 @@ def main() -> None:
         final = published(question)
         if kind in rows and final is not None:
             if kind == "binary":
-                calibration_rows.append((final, outcome))
+                start = (((question.get("my_forecasts") or {}).get("latest") or {}).get("start_time"))
+                forecast_time = (
+                    datetime.fromtimestamp(start, tz=timezone.utc).isoformat(timespec="seconds") if start else ""
+                )
+                calibration_rows.append((final, outcome, forecast_time, question.get("actual_resolve_time") or ""))
             base = brier(final, outcome, kind)
             rows[kind].setdefault("published", []).append((base, base))
             for model, forecast in members.items():
@@ -285,10 +290,13 @@ def main() -> None:
     os.makedirs("logs", exist_ok=True)
     with open("logs/calibration.csv", "w", newline="", encoding="utf-8") as fh:
         writer = csv.writer(fh)
-        writer.writerow(["prediction", "outcome"])
+        writer.writerow(["prediction", "outcome", "forecast_time", "resolve_time"])
         writer.writerows(calibration_rows)
     print(f"\nWrote logs/calibration.csv ({len(calibration_rows)} binary questions).", end=" ")
-    print("Run calibration.py on it once there are at least 20; it needs about 100 to detect a real miscalibration.")
+    print(
+        "Run calibration.py on it once there are at least 30 (20 to fit, 10 newer to test);"
+        " it needs about 100 to detect a real miscalibration."
+    )
 
     if args.include_open:
         print("\nUnresolved questions, parsed from the bot's comments:")
