@@ -275,6 +275,9 @@ async def run(mode: str, publish: bool, samples: int, limit: int | None) -> list
         bot.log_report_summary(reports)
     except RuntimeError:
         pass
+    if bot.model_failures:
+        failures = ", ".join(f"{name}: {n}" for name, n in sorted(bot.model_failures.items()))
+        print(f"Failed or unparsable model answers this run: {failures}")
     return reports
 
 

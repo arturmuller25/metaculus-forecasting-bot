@@ -118,6 +118,8 @@ def _align_options(parsed: PredictedOptionList, options: list[str]) -> Predicted
     total = sum(probs)
     if total <= 0:
         return None
+    if abs(total - 1) > 0.02:
+        logger.warning(f"Option probabilities summed to {total:.2f} before normalizing; check the parse")
     return PredictedOptionList(
         predicted_options=[
             PredictedOption(option_name=name, probability=p / total)
@@ -182,6 +184,8 @@ class ForecasterBot(ForecastBot):
         # only recorded to FORECAST_LOG, never aggregated or published. They
         # let a candidate configuration be scored on live questions.
         self._shadows = list(shadows or [])
+        # Failed or unparsable answers per model in this run, reported by main.py.
+        self.model_failures: dict[str, int] = {}
         if self._shadows:
             logger.info(f"Shadow models (recorded only): {', '.join(n for n, _ in self._shadows)}")
 
@@ -296,7 +300,7 @@ class ForecasterBot(ForecastBot):
         direction, threshold = m.group(1), m.group(2)
         return clean_indents(
             f"""
-            (g) THIS IS A META-QUESTION about another Metaculus question's
+            (h) THIS IS A META-QUESTION about another Metaculus question's
                 community prediction, with threshold {threshold}% ({direction}).
                 Your single most important job is the CURRENT value of that
                 community prediction. Open the referenced Metaculus question
@@ -311,6 +315,16 @@ class ForecasterBot(ForecastBot):
 
     async def run_research(self, question: MetaculusQuestion) -> str:
         async with self._concurrency_limiter:
+            # MiniBench questions are written and resolved by an LLM that applies
+            # the criteria and the named source literally.
+            literal_note = (
+                " This question is written and resolved by an automated system"
+                " that applies the criteria and the named source literally, so"
+                " report what the source shows in its own terms and units, and"
+                " flag anything a literal reading could resolve differently."
+                if any("minibench" in slug for slug in question.tournament_slugs or [])
+                else ""
+            )
             prompt = clean_indents(
                 f"""
                 You are a research assistant to a superforecaster. You do NOT
@@ -338,6 +352,15 @@ class ForecasterBot(ForecastBot):
                     Metaculus for this exact question or its closest match. If
                     you find one, quote the current price, the market, and the
                     date you saw it. This is one input, not the answer.
+                (g) The resolution source: find the exact source the resolution
+                    criteria or fine print name (a page, dataset, table, index or
+                    official body). Open it and report its name and URL, the latest
+                    value or status that matters for this question with its date,
+                    and, if the question has a threshold, how far that value is
+                    from it. Say whether you opened it: "Resolution source opened:
+                    yes", or "Resolution source opened: no" with the reason. Do not
+                    substitute a news report for the source when the source itself
+                    is reachable.{literal_note}
                 {self._meta_question_block(question)}
                 State plainly where evidence is missing or contradictory. Never
                 pad. If the question would resolve today on current information,
@@ -363,15 +386,31 @@ class ForecasterBot(ForecastBot):
                 *(self._provider(name, question, prompt) for name in self._research_providers),
                 return_exceptions=True,
             )
-            parts = []
+            parts, sizes = [], []
             labels = ["Primary web research"] + list(self._research_providers)
             for label, b in zip(labels, blocks):
                 if isinstance(b, Exception):
                     logger.warning(f"Research provider {label} failed: {type(b).__name__}: {b}")
                     continue
-                if b and b.strip():
-                    parts.append(f"## Source: {label}\n{b.strip()}")
+                text = (b or "").strip()
+                sizes.append(f"{label} {len(text)}")
+                if not text:
+                    logger.warning(f"Research provider {label} returned nothing for {question.page_url}")
+                    continue
+                parts.append(f"## Source: {label}\n{text}")
             research = "\n\n".join(parts)
+
+            # Guards: context that silently goes missing has cost other bots badly.
+            if not (question.resolution_criteria or "").strip():
+                logger.warning(f"No resolution criteria for {question.page_url}")
+            if len(research) < 1000:
+                logger.warning(f"Research is very short ({len(research)} chars) for {question.page_url}")
+            opened = research.count("Resolution source opened: yes")
+            logger.info(
+                f"Research sizes for {question.page_url} (chars): {', '.join(sizes)}; "
+                f"fine print {len((question.fine_print or '').strip())}; "
+                f"resolution source opened in {opened} block(s)"
+            )
             logger.info(f"Research for {question.page_url} ({len(parts)} sources):\n{research}")
             return research
 
@@ -408,9 +447,11 @@ class ForecasterBot(ForecastBot):
                 prediction = await parse(text)
             except Exception as exc:
                 logger.warning(f"{name} ({role}) failed: {type(exc).__name__}: {exc}")
+                self.model_failures[f"{name} ({role})"] = self.model_failures.get(f"{name} ({role})", 0) + 1
                 return None
             if prediction is None:
                 logger.warning(f"{name} ({role}): answer could not be parsed")
+                self.model_failures[f"{name} ({role})"] = self.model_failures.get(f"{name} ({role})", 0) + 1
                 return None
             _record(question, name, role, prediction)
             return name, prediction, text
@@ -501,6 +542,11 @@ class ForecasterBot(ForecastBot):
 
         values = [p for _, p, _ in answers]
         consensus = _trimmed_mean(values)
+        if max(values) - min(values) >= 0.30:
+            logger.warning(
+                f"Members disagree by {max(values) - min(values):.0%} on {question.page_url}: "
+                + ", ".join(f"{p:.0%}" for p in values)
+            )
         details = "\n\n".join(f"### {m} forecast {p:.0%}\n{t}" for m, p, t in answers)
         summary = (
             f"Ensemble of {len(answers)} models: "
@@ -564,11 +610,6 @@ class ForecasterBot(ForecastBot):
             (a) The time left until the outcome to the question is known.
             (b) The status quo outcome if nothing changed.
             (c) A description of a scenario that results in an unexpected outcome.
-
-            You write your rationale remembering that (1) good forecasters put
-            extra weight on the status quo outcome since the world changes slowly
-            most of the time, and (2) good forecasters leave some moderate
-            probability on most options to account for unexpected outcomes.
 
             The last thing you write is your final probabilities for the N options
             in this order {question.options} as:
@@ -716,7 +757,19 @@ class ForecasterBot(ForecastBot):
                 additional_instructions=parsing_instructions,
                 num_validation_samples=self._structure_output_validation_samples,
             )
-            return NumericDistribution.from_question(percentiles, question)
+            distribution = NumericDistribution.from_question(percentiles, question)
+            # Guard: a median far outside the question's range usually means a
+            # unit or power-of-ten slip in the answer or the parse.
+            low, high = question.lower_bound, question.upper_bound
+            median = _quantile(distribution, 0.5)
+            if low is not None and high is not None and not (
+                low - (high - low) <= median <= high + (high - low)
+            ):
+                logger.warning(
+                    f"Numeric median {_fmt_num(median)} is far outside the range "
+                    f"[{_fmt_num(low)}, {_fmt_num(high)}] on {question.page_url}; check units"
+                )
+            return distribution
 
         answers = await self._ask_models(question, prompt, parse)
         if len(answers) == 1:
@@ -780,6 +833,11 @@ class ForecasterBot(ForecastBot):
         if isinstance(aggregate, float) and (self._cal_a, self._cal_b) != (1.0, 0.0):
             calibrated = apply_platt(aggregate, self._cal_a, self._cal_b)
             logger.info(f"Calibration: {aggregate:.4f} -> {calibrated:.4f}")
-            return calibrated
+            aggregate = calibrated
+
+        # Guard: under log scoring one confident miss erases about eleven
+        # confident hits, so extreme published forecasts are flagged for review.
+        if isinstance(aggregate, float) and (aggregate <= 0.02 or aggregate >= 0.98):
+            logger.warning(f"Extreme forecast {aggregate:.1%} on {question.page_url}; review the reasoning")
 
         return aggregate
