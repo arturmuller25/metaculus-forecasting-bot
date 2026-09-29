@@ -5,9 +5,12 @@ name: Forecast
 # tournament, 3 hours on MiniBench), while scheduled runs here started 2 to 5
 # hours apart instead of every 30 minutes (measured 2026-09-19). So each
 # scheduled run stays alive for up to 5.5 hours and checks for new questions
-# every 20 minutes, and the next scheduled run waits in the concurrency group
-# and takes over. An iteration with no new question costs one API call and no
-# LLM tokens. Cron uses off-peak minutes, which GitHub delays less.
+# every 20 minutes, and the next run waits in the concurrency group and takes
+# over. Cron alone still left a gap of over 2 hours (2026-09-28), so every
+# production run also queues its successor when it starts; cron is the backup.
+# To stop the bot, disable this workflow. An iteration with no new question
+# costs one API call and no LLM tokens. Cron uses off-peak minutes, which
+# GitHub delays less.
 on:
   schedule:
     - cron: "7,37 * * * *"
@@ -41,7 +44,23 @@ jobs:
     # GitHub's hard limit is 360 minutes. The loop stops by itself at about
     # 330; this only matters if a forecast hangs.
     timeout-minutes: 355
+    permissions:
+      contents: read
+      actions: write # to queue the next run
     steps:
+      - name: Queue the next run
+        # Production runs only: scheduled, or manual with tournament, publish
+        # and loop. The queued run waits until this one ends; a newer queued
+        # run replaces it, so there is never more than one waiting.
+        if: github.event_name == 'schedule' || (github.event.inputs.mode == 'tournament' && github.event.inputs.publish == 'true' && github.event.inputs.loop == 'true')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: >-
+          gh workflow run forecast.yml --ref "${{ github.ref_name }}"
+          -f mode=tournament -f publish=true -f loop=true
+          || echo "could not queue the next run; cron remains the backup"
+
       - uses: actions/checkout@v4
 
       - uses: astral-sh/setup-uv@v5

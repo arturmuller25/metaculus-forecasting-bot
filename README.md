@@ -95,8 +95,10 @@ All optional; defaults live in `main.py`. See `.env.example`.
 
 `.github/workflows/forecast.yml` runs the bot on a schedule. Each scheduled
 run checks for new questions every 20 minutes for about five and a half hours
-and publishes to the seasonal tournament and MiniBench; the next run takes over
-when it ends. Add `METACULUS_TOKEN` and `OPENROUTER_API_KEY` (plus any optional
+and publishes to the seasonal tournament and MiniBench. Each production run
+queues the next one when it starts, so a new run takes over as soon as it ends,
+with the schedule as a backup; disable the workflow to stop the bot. Add
+`METACULUS_TOKEN` and `OPENROUTER_API_KEY` (plus any optional
 provider keys) as repository secrets. Calibration coefficients go in as
 repository variables. Manual runs from the Actions tab let you choose the mode
 and whether to publish.
