@@ -85,7 +85,11 @@ def bot_comment_text(post_id: int, user_id: int) -> str:
     and longer than 1,000 characters are archived: the list endpoint returns
     only the first 200 characters, so those are fetched one by one.
     """
-    results = get("/comments/", post=post_id, author=user_id, is_private="true", limit=5)["results"]
+    # Bot comments are published publicly; private ones only appear when
+    # asked for explicitly, so both are tried.
+    results = get("/comments/", post=post_id, author=user_id, limit=5)["results"]
+    if not results:
+        results = get("/comments/", post=post_id, author=user_id, is_private="true", limit=5)["results"]
     if not results:
         return ""
     comment = results[0]
