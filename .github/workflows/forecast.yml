@@ -74,6 +74,9 @@ jobs:
         env:
           METACULUS_TOKEN: ${{ secrets.METACULUS_TOKEN }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          # Optional key of your own, used when the tournament key runs low.
+          OPENROUTER_FALLBACK_KEY: ${{ secrets.OPENROUTER_FALLBACK_KEY }}
+          FALLBACK_BELOW: ${{ vars.FALLBACK_BELOW }}
           CALIBRATION_A: ${{ vars.CALIBRATION_A }}
           CALIBRATION_B: ${{ vars.CALIBRATION_B }}
           # Optional research providers. A missing secret arrives empty and

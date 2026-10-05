@@ -38,7 +38,9 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 dotenv.load_dotenv(".env")
 
 API = "https://www.metaculus.com/api"
-TOURNAMENTS = ["minibench", 33121]  # MiniBench and the Fall 2026 FutureEval tournament
+TOURNAMENTS = ["minibench", 33121]  # current MiniBench and the Fall 2026 FutureEval tournament
+# Earlier MiniBench rounds move to their own project when the next round starts.
+TOURNAMENTS += [int(t) for t in os.getenv("EXTRA_TOURNAMENTS", "").split(",") if t.strip()]
 SESSION = requests.Session()
 SESSION.headers["Authorization"] = f"Token {os.environ['METACULUS_TOKEN']}"
 

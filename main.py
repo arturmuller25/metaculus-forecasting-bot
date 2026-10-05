@@ -179,13 +179,8 @@ def check_env(publish: bool) -> None:
         print("Dry run: nothing will be published. Use --publish to submit.\n")
 
 
-def openrouter_usage() -> float | None:
-    """
-    Total spent on the OpenRouter key, in USD, read from OpenRouter itself.
-    The library's cost tracking misses :online search and hidden reasoning
-    tokens; the /key endpoint shows what is actually charged.
-    """
-    key = os.getenv("OPENROUTER_API_KEY")
+def _key_info(key: str | None) -> dict | None:
+    """The /key record of an OpenRouter key, or None when it cannot be read."""
     if not key:
         return None
     import json
@@ -197,9 +192,40 @@ def openrouter_usage() -> float | None:
     )
     try:
         with urllib.request.urlopen(req, timeout=20) as resp:
-            data = json.load(resp).get("data", {})
+            return json.load(resp).get("data", {})
     except Exception as exc:
         logger.warning(f"Could not read the OpenRouter balance: {exc}")
+        return None
+
+
+def use_fallback_key_if_low() -> None:
+    """
+    Switches to OPENROUTER_FALLBACK_KEY, a key the bot maker funds, when the
+    tournament key has less than FALLBACK_BELOW dollars left (default 3,
+    about four questions), so questions are not missed while a top-up is
+    pending. Checked at the start of every run; once the tournament key is
+    topped up, the next run goes back to it. Without the variable nothing
+    changes.
+    """
+    fallback = (os.getenv("OPENROUTER_FALLBACK_KEY") or "").strip()
+    if not fallback:
+        return
+    floor = float((os.getenv("FALLBACK_BELOW") or "").strip() or 3)
+    data = _key_info(os.getenv("OPENROUTER_API_KEY"))
+    remaining = (data or {}).get("limit_remaining")
+    if remaining is not None and float(remaining) < floor:
+        os.environ["OPENROUTER_API_KEY"] = fallback
+        print(f"Tournament key has ${float(remaining):.2f} left (below ${floor:.2f}): using the fallback key.\n")
+
+
+def openrouter_usage() -> float | None:
+    """
+    Total spent on the OpenRouter key, in USD, read from OpenRouter itself.
+    The library's cost tracking misses :online search and hidden reasoning
+    tokens; the /key endpoint shows what is actually charged.
+    """
+    data = _key_info(os.getenv("OPENROUTER_API_KEY"))
+    if data is None:
         return None
 
     # On BYOK keys (provider keys plugged into OpenRouter) spend shows in
@@ -304,6 +330,11 @@ def diagnose(reports: list) -> None:
             "\n     They arrive as an OpenRouter key. Put it in OPENROUTER_API_KEY in .env."
             "\n  2. Use your own OpenAI, Anthropic or OpenRouter key in .env."
         )
+    elif "402" in blob or "credits" in blob.lower() or "key limit" in blob.lower():
+        print(
+            "\nDIAGNOSIS: the OpenRouter key is out of credit."
+            "\nAsk Metaculus for a top-up, or set OPENROUTER_FALLBACK_KEY to a funded key of your own."
+        )
     elif "401" in blob or "Permission" in blob or "authenticat" in blob.lower():
         print(
             "\nDIAGNOSIS: METACULUS_TOKEN was rejected."
@@ -356,6 +387,7 @@ def main() -> None:
     )
 
     check_env(args.publish)
+    use_fallback_key_if_low()
 
     print(f"Mode      : {args.mode}")
     print(f"Model     : {FORECAST_MODEL}")
