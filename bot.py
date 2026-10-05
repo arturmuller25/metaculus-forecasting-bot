@@ -39,6 +39,7 @@ from forecasting_tools import (
 )
 
 from calibration import apply_platt
+from numeric_cdf import SmoothDistribution
 
 logger = logging.getLogger(__name__)
 
@@ -196,6 +197,20 @@ class ForecasterBot(ForecastBot):
         self._cal_b = _env_float("CALIBRATION_B", 0.0)
         if (self._cal_a, self._cal_b) != (1.0, 0.0):
             logger.info(f"Calibration on: A={self._cal_a}, B={self._cal_b}")
+
+        # How a model's percentiles become the numeric CDF (numeric_cdf.py).
+        # Replayed on the 24 numeric and discrete questions of MiniBench round
+        # 1 (numeric_replay.py), PCHIP with the percentiles stretched 15% from
+        # the median scored +5.74 peer points per question over the library's
+        # linear interpolation (90% CI +0.10 to +11.86), in line with a public
+        # replay on 97 questions (+4.92). NUMERIC_CDF=linear and
+        # NUMERIC_WIDEN=1 restore the library's construction.
+        self._cdf_method = (os.getenv("NUMERIC_CDF") or "").strip() or "pchip"
+        if self._cdf_method not in ("pchip", "pchip-body", "linear"):
+            logger.warning(f"Unknown NUMERIC_CDF {self._cdf_method!r}; using pchip")
+            self._cdf_method = "pchip"
+        self._cdf_widen = _env_float("NUMERIC_WIDEN", 1.15)
+        logger.info(f"Numeric CDF: {self._cdf_method}, widen {self._cdf_widen}")
 
         # Models from different families answering the same question. An
         # empty list falls back to the single default model.
@@ -757,7 +772,9 @@ class ForecasterBot(ForecastBot):
                 additional_instructions=parsing_instructions,
                 num_validation_samples=self._structure_output_validation_samples,
             )
-            distribution = NumericDistribution.from_question(percentiles, question)
+            distribution = SmoothDistribution.build(
+                percentiles, question, method=self._cdf_method, widen=self._cdf_widen
+            )
             # Guard: a median far outside the question's range usually means a
             # unit or power-of-ten slip in the answer or the parse.
             low, high = question.lower_bound, question.upper_bound

@@ -90,6 +90,8 @@ All optional; defaults live in `main.py`. See `.env.example`.
 | `RESEARCH_PROVIDERS` | auto | force a provider list, e.g. `asknews,anthropic-search` |
 | `MAX_COST_PER_RUN` | `5.00` | cost cap per run in USD (web search cost is not tracked) |
 | `CALIBRATION_A`, `CALIBRATION_B` | `1.0`, `0.0` | Platt scaling coefficients |
+| `NUMERIC_CDF` | `pchip` | how percentiles become the numeric CDF: `pchip`, `pchip-body` or `linear` (the library's) |
+| `NUMERIC_WIDEN` | `1.15` | stretch of the percentiles from the median before building the CDF; `1` leaves them as given |
 | `OPENROUTER_FALLBACK_KEY` | none | an OpenRouter key of your own, used instead of `OPENROUTER_API_KEY` when that key has less than `FALLBACK_BELOW` dollars left |
 | `FALLBACK_BELOW` | `3` | remaining balance, in USD, below which the fallback key takes over |
 
