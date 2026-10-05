@@ -40,7 +40,8 @@ concurrency:
 
 jobs:
   forecast:
-    runs-on: ubuntu-latest
+    # Pinned: ubuntu-latest moves to Ubuntu 26 from 2026-10-19, mid-season.
+    runs-on: ubuntu-24.04
     # GitHub's hard limit is 360 minutes. The loop stops by itself at about
     # 330; this only matters if a forecast hangs.
     timeout-minutes: 355
