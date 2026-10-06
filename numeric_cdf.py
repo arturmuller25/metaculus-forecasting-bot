@@ -77,6 +77,10 @@ class SmoothDistribution(NumericDistribution):
     # Stretch factor for the distance of each declared percentile from the
     # median, measured on the question's axis (log axis on log questions).
     widen: float = 1.0
+    # Optional separate factor below the median. A model's low percentiles
+    # often sit on a known floor (a count already confirmed), which
+    # stretching would push below; widen_low=1 keeps them where they are.
+    widen_low: float | None = None
 
     @classmethod
     def build(
@@ -85,15 +89,18 @@ class SmoothDistribution(NumericDistribution):
         question,
         method: Method = "pchip",
         widen: float = 1.0,
+        widen_low: float | None = None,
     ) -> SmoothDistribution:
         base = NumericDistribution.from_question(percentiles, question)
-        return cls(**base.model_dump(), method=method, widen=widen)
+        return cls(**base.model_dump(), method=method, widen=widen, widen_low=widen_low)
 
     def _stretched(self, declared: list[Percentile]) -> list[Percentile]:
         heights = np.array([p.percentile for p in declared])
         locations = np.array([self._nominal_location_to_cdf_location(p.value) for p in declared])
         median = float(np.interp(0.5, heights, locations))
-        stretched = median + self.widen * (locations - median)
+        low = self.widen if self.widen_low is None else self.widen_low
+        factor = np.where(locations < median, low, self.widen)
+        stretched = median + factor * (locations - median)
         return [
             Percentile(percentile=float(h), value=self._cdf_location_to_nominal_location(float(loc)))
             for h, loc in zip(heights, stretched)
@@ -105,7 +112,7 @@ class SmoothDistribution(NumericDistribution):
         axis, and a mask of which points were declared.
         """
         declared = self.declared_percentiles
-        if self.widen != 1.0:
+        if self.widen != 1.0 or self.widen_low is not None:
             declared = self._stretched(declared)
         anchors = self._add_explicit_upper_lower_bound_percentiles(declared)
         x = np.array([self._nominal_location_to_cdf_location(p.value) for p in anchors])

@@ -12,6 +12,8 @@ like the live bot:
   pchip body     monotone cubic between P10 and P90, linear tails
   pchip x1.15    pchip after stretching the percentiles 15% from the median
   linear x1.15   the same stretch with linear interpolation
+  upper only     pchip stretching only the percentiles above the median, so
+                 low percentiles sitting on a known floor stay put
 
 Member percentiles come from forecasts.jsonl records when available (exact),
 otherwise from the bot's comment. A question enters the comparison only if
@@ -50,6 +52,8 @@ VARIANTS = {
     "pchip body": ("pchip-body", 1.0),
     "pchip x1.15": ("pchip", 1.15),
     "linear x1.15": ("linear", 1.15),
+    "pchip x1.15 upper only": ("pchip", 1.15, 1.0),
+    "pchip x1.3 upper only": ("pchip", 1.3, 1.0),
 }
 # Largest gap between the rebuilt linear CDF and the published one for the
 # question to count as reproduced. Comment values are rounded to 4 digits.
@@ -115,11 +119,13 @@ def members_from_comment(text: str) -> tuple[dict[str, list[tuple[float, float]]
 # ---------------------------------------------------------------------------
 
 
-async def final_cdf(members: list[list[tuple[float, float]]], question, method: str, widen: float) -> np.ndarray:
+async def final_cdf(
+    members: list[list[tuple[float, float]]], question, method: str, widen: float, widen_low: float | None = None
+) -> np.ndarray:
     """The CDF the bot would publish if its members were built this way."""
     dists = [
         SmoothDistribution.build(
-            [Percentile(percentile=p, value=v) for p, v in pts], question, method=method, widen=widen
+            [Percentile(percentile=p, value=v) for p, v in pts], question, method=method, widen=widen, widen_low=widen_low
         )
         for pts in members
     ]
@@ -200,9 +206,9 @@ def main() -> None:
             continue
 
         cdfs = {}
-        for name, (method, widen) in VARIANTS.items():
+        for name, (method, widen, *low) in VARIANTS.items():
             try:
-                cdfs[name] = asyncio.run(final_cdf(list(members.values()), question, method, widen))
+                cdfs[name] = asyncio.run(final_cdf(list(members.values()), question, method, widen, *low))
             except Exception as exc:  # noqa: BLE001
                 skipped.append(f"{pid}: {name} failed: {type(exc).__name__}: {str(exc)[:100]}")
         if "linear" not in cdfs:
