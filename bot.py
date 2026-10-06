@@ -552,9 +552,11 @@ class ForecasterBot(ForecastBot):
             (d) A brief description of a scenario that results in a No outcome.
             (e) A brief description of a scenario that results in a Yes outcome.
 
-            You write your rationale remembering that good forecasters put extra
-            weight on the status quo outcome since the world changes slowly most
-            of the time. You also remember that most things that have never
+            You treat the status quo as the current trajectory, not today's
+            snapshot: for transient states (an active fire, an outbreak, a
+            storm, a crisis) estimate the chance it persists using a daily
+            hazard from comparable past cases and the shortest official forecast
+            available. You also remember that most things that have never
             happened before do not happen in the next few months. Historically,
             forecasters like you have been overconfident, and only about 35% of
             Metaculus binary questions resolve Yes.

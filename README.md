@@ -17,7 +17,7 @@ skipped):
    Exa or Perplexity when their API keys are set. The pages and data files
    named in the resolution criteria are also downloaded by code, without an
    LLM (`resolution_fetch.py`), so the forecasters see the source itself.
-2. **Forecast.** Two models from different families (GPT-5.6 Sol and Claude
+2. **Forecast.** Two models from different families (GPT-6.1 Sol and Claude
    Sonnet 5) forecast every question from the same briefing. Binary
    probabilities are averaged, multiple-choice probabilities are averaged per
    option, and numeric and discrete distributions are combined by the
@@ -81,12 +81,12 @@ All optional; defaults live in `main.py`. See `.env.example`.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `FORECAST_MODEL` | `openrouter/openai/gpt-5.6-sol` | forecasting model when the ensemble is off |
+| `FORECAST_MODEL` | `openrouter/openai/gpt-6.1-sol` | forecasting model when the ensemble is off |
 | `RESEARCH_MODEL` | `openrouter/openai/gpt-5.6-sol:online` | primary research model (web search) |
 | `PARSER_MODEL` | `openrouter/openai/gpt-4o-mini` | extracts structured values from model output |
 | `REASONING_EFFORT` | `high` | reasoning effort for forecasting models |
 | `RESEARCH_REASONING` | `low` | reasoning effort for research calls |
-| `ENSEMBLE_MODELS` | GPT-5.6 Sol, Claude Sonnet 5 | comma-separated ensemble |
+| `ENSEMBLE_MODELS` | GPT-6.1 Sol, Claude Sonnet 5 | comma-separated ensemble |
 | `ENSEMBLE` | on | `0` disables the ensemble |
 | `SHADOW_MODELS` | none | models that forecast every question but are only recorded, never published, as `model[@effort]`, e.g. `openrouter/openai/gpt-5.4` |
 | `RESEARCH_PROVIDERS` | auto | force a provider list, e.g. `asknews,anthropic-search` |
@@ -166,6 +166,7 @@ These spend API credits and publish nothing.
 | `resolution_fetch.py` | downloads the pages and data files named in the resolution criteria |
 | `analyze_results.py` | scores resolved forecasts, overall and per model |
 | `numeric_replay.py` | compares the numeric CDF constructions on the bot's own questions |
+| `forecast_replay.py` | replays the forecast step with frozen research on resolved questions, to compare models and prompt variants |
 | `coverage_check.py` | lists recently closed questions the bot did not forecast (runs at the end of each Actions run) |
 | `.github/workflows/forecast.yml` | scheduled runs |
 

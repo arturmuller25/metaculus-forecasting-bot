@@ -55,9 +55,15 @@ if _HAS_OPENROUTER:
     # GPT-5.x as the final forecaster is the strongest signal repeated across
     # the last two tournament seasons (r=+0.42 in Metaculus's analysis).
     # GPT-5.6 Sol and Claude Sonnet 5 replaced gpt-5.4 and claude-sonnet-4.6
-    # on 2026-09-22: newer, and cheaper per token. gpt-5.4 keeps running as a
-    # shadow model (SHADOW_MODELS) to catch a regression.
-    _FORECAST = "openrouter/openai/gpt-5.6-sol"
+    # on 2026-09-22: newer, and cheaper per token. GPT-6.1 Sol replaced
+    # GPT-5.6 Sol as forecaster on 2026-10-07: in a replay of MiniBench round
+    # 1 (forecast_replay.py, two runs) it tied on binaries and did better on
+    # numerics (+2.8 points per question, 90% CI +0.05 to +5.7) at the same
+    # price. GPT-5.6 Sol still does the research, and runs as a shadow
+    # forecaster (SHADOW_MODELS) to catch a regression. Claude Opus 5.5 cost
+    # 60% more without a clear gain, and Claude Sonnet 5.5 returned no
+    # reasoning tokens through OpenRouter, so Sonnet 5 stays.
+    _FORECAST = "openrouter/openai/gpt-6.1-sol"
     _RESEARCH = "openrouter/openai/gpt-5.6-sol:online"
     _PARSER = "openrouter/openai/gpt-4o-mini"
     # No Google model: this key has no usable Gemini quota (checked
@@ -69,7 +75,7 @@ if _HAS_OPENROUTER:
     # research providers; with a web search per member, one question cost
     # $4.38 (measured 2026-09-22) and the members repeated the same engines.
     _ENSEMBLE = [
-        "openrouter/openai/gpt-5.6-sol",
+        "openrouter/openai/gpt-6.1-sol",
         "openrouter/anthropic/claude-sonnet-5",
     ]
 else:
