@@ -315,7 +315,7 @@ class ForecasterBot(ForecastBot):
         direction, threshold = m.group(1), m.group(2)
         return clean_indents(
             f"""
-            (h) THIS IS A META-QUESTION about another Metaculus question's
+            (j) THIS IS A META-QUESTION about another Metaculus question's
                 community prediction, with threshold {threshold}% ({direction}).
                 Your single most important job is the CURRENT value of that
                 community prediction. Open the referenced Metaculus question
@@ -366,7 +366,10 @@ class ForecasterBot(ForecastBot):
                 (f) Prediction markets: search Polymarket, Kalshi, Manifold and
                     Metaculus for this exact question or its closest match. If
                     you find one, quote the current price, the market, and the
-                    date you saw it. This is one input, not the answer.
+                    date you saw it, and compare its resolution rules with this
+                    question's: a broader or differently measured contract is a
+                    ceiling, a floor or a direction, not an anchor. This is one
+                    input, not the answer.
                 (g) The resolution source: find the exact source the resolution
                     criteria or fine print name (a page, dataset, table, index or
                     official body). Open it and report its name and URL, the latest
@@ -376,6 +379,23 @@ class ForecasterBot(ForecastBot):
                     yes", or "Resolution source opened: no" with the reason. Do not
                     substitute a news report for the source when the source itself
                     is reachable.{literal_note}
+                (h) What changed since the question was written: list the dated
+                    facts the question text and background rely on (a schedule,
+                    a count, a value, an "as of" date) and search for anything
+                    newer about each one (postponed, rescheduled, cancelled,
+                    withdrawn, continued, and the same words in the local
+                    language). If a recent, specific report contradicts the
+                    official source, say which item changed and what you found;
+                    never explain a contradiction away without searching.
+                (i) Scheduled events (hearings, court sessions, debates, votes,
+                    launches, deal closings, data releases): find the primary
+                    document that fixes the date (the docket or court calendar,
+                    the official agenda, the filing such as the merger
+                    agreement on SEC EDGAR, the publisher's release calendar)
+                    and report the date of the most recent primary
+                    confirmation and any preparatory step already taken.
+                    Check the year of every dated document you use; one from
+                    another year is not evidence about this one.
                 {self._meta_question_block(question)}
                 State plainly where evidence is missing or contradictory. Never
                 pad. If the question would resolve today on current information,
