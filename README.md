@@ -14,7 +14,9 @@ skipped):
 1. **Research.** Several independent search providers run in parallel and
    their results are combined into one briefing, each block labeled with its
    source: GPT-5.6 Sol web search, Claude Sonnet 5 web search, and AskNews,
-   Exa or Perplexity when their API keys are set.
+   Exa or Perplexity when their API keys are set. The pages and data files
+   named in the resolution criteria are also downloaded by code, without an
+   LLM (`resolution_fetch.py`), so the forecasters see the source itself.
 2. **Forecast.** Two models from different families (GPT-5.6 Sol and Claude
    Sonnet 5) forecast every question from the same briefing. Binary
    probabilities are averaged, multiple-choice probabilities are averaged per
@@ -88,6 +90,7 @@ All optional; defaults live in `main.py`. See `.env.example`.
 | `ENSEMBLE` | on | `0` disables the ensemble |
 | `SHADOW_MODELS` | none | models that forecast every question but are only recorded, never published, as `model[@effort]`, e.g. `openrouter/openai/gpt-5.4` |
 | `RESEARCH_PROVIDERS` | auto | force a provider list, e.g. `asknews,anthropic-search` |
+| `RESOLUTION_FETCH` | on | `0` turns off downloading the resolution sources |
 | `MAX_COST_PER_RUN` | `5.00` | cost cap per run in USD (web search cost is not tracked) |
 | `CALIBRATION_A`, `CALIBRATION_B` | `1.0`, `0.0` | Platt scaling coefficients |
 | `NUMERIC_CDF` | `pchip` | how percentiles become the numeric CDF: `pchip`, `pchip-body` or `linear` (the library's) |
@@ -160,6 +163,7 @@ These spend API credits and publish nothing.
 | `main.py` | command line, model configuration, tournament selection, cost reporting |
 | `calibration.py` | Platt scaling and coefficient fitting |
 | `numeric_cdf.py` | alternative ways to build a numeric CDF from percentiles |
+| `resolution_fetch.py` | downloads the pages and data files named in the resolution criteria |
 | `analyze_results.py` | scores resolved forecasts, overall and per model |
 | `numeric_replay.py` | compares the numeric CDF constructions on the bot's own questions |
 | `coverage_check.py` | lists recently closed questions the bot did not forecast (runs at the end of each Actions run) |

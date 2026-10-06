@@ -40,6 +40,7 @@ from forecasting_tools import (
 
 from calibration import apply_platt
 from numeric_cdf import SmoothDistribution
+from resolution_fetch import fetch_resolution_sources
 
 logger = logging.getLogger(__name__)
 
@@ -416,13 +417,23 @@ class ForecasterBot(ForecastBot):
                     return ""
                 return await self.get_llm("researcher", "llm").invoke(prompt)
 
+            # The pages and files named in the resolution criteria, downloaded
+            # by code (resolution_fetch.py). Top bots in MiniBench round 1
+            # won several questions by reading the source dataset that the
+            # research models could not open. RESOLUTION_FETCH=0 turns it off.
+            async def fetched() -> str:
+                if os.getenv("RESOLUTION_FETCH", "").strip() == "0":
+                    return ""
+                return await asyncio.to_thread(fetch_resolution_sources, question)
+
             blocks = await asyncio.gather(
                 primary(),
+                fetched(),
                 *(self._provider(name, question, prompt) for name in self._research_providers),
                 return_exceptions=True,
             )
             parts, sizes = [], []
-            labels = ["Primary web research"] + list(self._research_providers)
+            labels = ["Primary web research", "Resolution source download"] + list(self._research_providers)
             for label, b in zip(labels, blocks):
                 if isinstance(b, Exception):
                     logger.warning(f"Research provider {label} failed: {type(b).__name__}: {b}")
@@ -430,7 +441,9 @@ class ForecasterBot(ForecastBot):
                 text = (b or "").strip()
                 sizes.append(f"{label} {len(text)}")
                 if not text:
-                    logger.warning(f"Research provider {label} returned nothing for {question.page_url}")
+                    # No URL in the criteria is normal for the download step.
+                    if label != "Resolution source download":
+                        logger.warning(f"Research provider {label} returned nothing for {question.page_url}")
                     continue
                 parts.append(f"## Source: {label}\n{text}")
             research = "\n\n".join(parts)
@@ -441,10 +454,13 @@ class ForecasterBot(ForecastBot):
             if len(research) < 1000:
                 logger.warning(f"Research is very short ({len(research)} chars) for {question.page_url}")
             opened = research.count("Resolution source opened: yes")
+            downloaded = research.count("\nRead by ")
+            missed = research.count("\nNOT READ (")
             logger.info(
                 f"Research sizes for {question.page_url} (chars): {', '.join(sizes)}; "
                 f"fine print {len((question.fine_print or '').strip())}; "
-                f"resolution source opened in {opened} block(s)"
+                f"resolution source opened in {opened} block(s); "
+                f"criteria URLs downloaded {downloaded}, not read {missed}"
             )
             logger.info(f"Research for {question.page_url} ({len(parts)} sources):\n{research}")
             return research
