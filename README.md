@@ -172,6 +172,8 @@ These spend API credits and publish nothing.
 | `calibration.py` | Platt scaling and coefficient fitting |
 | `numeric_cdf.py` | alternative ways to build a numeric CDF from percentiles |
 | `resolution_fetch.py` | downloads the pages and data files named in the resolution criteria |
+| `agent_forecaster.py` | agentic forecaster on the Anthropic API (web search, page reading, code execution), used as a shadow with `SHADOW_MODELS=agent/claude-sonnet-5@high`; it runs after the forecasts are published |
+| `agent_test.py` | dry-run test of the agentic forecaster on recent questions |
 | `analyze_results.py` | scores resolved forecasts, overall and per model |
 | `numeric_replay.py` | compares the numeric CDF constructions on the bot's own questions |
 | `forecast_replay.py` | replays the forecast step with frozen research on resolved questions, to compare models and prompt variants |

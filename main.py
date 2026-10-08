@@ -192,9 +192,20 @@ def build_bot(publish: bool, samples: int) -> ForecasterBot:
     # "anthropic/claude-opus-5-5" for a shadow paid by the Anthropic key.
     shadows = []
     for spec in (s.strip() for s in os.getenv("SHADOW_MODELS", "").split(",")):
-        if spec:
-            model, _, effort = spec.partition("@")
-            shadows.append((spec, _thinker(model.strip(), 0.3, 120, effort=effort.strip() or None)))
+        if not spec:
+            continue
+        if spec.startswith("agent/"):
+            # Agentic forecaster on the Anthropic API (agent_forecaster.py):
+            # searches, reads pages and runs code before forecasting. It takes
+            # minutes, so it runs after the run's forecasts are published.
+            from agent_forecaster import AgentForecaster
+
+            agent = AgentForecaster.from_spec(spec)
+            agent.deferred = True
+            shadows.append((spec, agent))
+            continue
+        model, _, effort = spec.partition("@")
+        shadows.append((spec, _thinker(model.strip(), 0.3, 120, effort=effort.strip() or None)))
 
     return ForecasterBot(
         ensemble=ensemble,
@@ -391,6 +402,9 @@ async def run(mode: str, publish: bool, samples: int, limit: int | None) -> list
             reports = await bot.forecast_questions(chosen, return_exceptions=True)
 
         tracked = cost.current_usage
+
+    # Slow shadows (the agent) run now, after every forecast is published.
+    await bot.run_deferred_shadows()
 
     after = openrouter_usage()
     print(f"\nCost tracked by the library : ${tracked:.4f}")

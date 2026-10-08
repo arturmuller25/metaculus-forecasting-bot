@@ -6,6 +6,7 @@ readme = "README.md"
 license = "MIT"
 requires-python = ">=3.12"
 dependencies = [
+    "anthropic>=1.12.1",
     "forecasting-tools>=0.2.90",
     "python-dotenv>=1.2.3",
 ]

@@ -186,6 +186,10 @@ class ForecasterBot(ForecastBot):
         # only recorded to FORECAST_LOG, never aggregated or published. They
         # let a candidate configuration be scored on live questions.
         self._shadows = list(shadows or [])
+        # Slow shadows (an llm with deferred = True, such as the agentic
+        # forecaster) wait here and run after the run's forecasts are
+        # published (run_deferred_shadows), so they never delay a question.
+        self._deferred_shadows: list[tuple] = []
         # Failed or unparsable answers per model in this run, reported by main.py.
         self.model_failures: dict[str, int] = {}
         if self._shadows:
@@ -507,14 +511,34 @@ class ForecasterBot(ForecastBot):
             _record(question, name, role, prediction)
             return name, prediction, text
 
+        quick = [(name, llm) for name, llm in self._shadows if not getattr(llm, "deferred", False)]
+        self._deferred_shadows += [
+            (question, name, llm, prompt, parse) for name, llm in self._shadows if getattr(llm, "deferred", False)
+        ]
         results = await asyncio.gather(
             *(ask(name, llm, "member") for name, llm in members),
-            *(ask(name, llm, "shadow") for name, llm in self._shadows),
+            *(ask(name, llm, "shadow") for name, llm in quick),
         )
         answers = [r for r in results[: len(members)] if r is not None]
         if not answers:
             raise RuntimeError("every forecasting model failed on this question")
         return answers
+
+    async def run_deferred_shadows(self) -> None:
+        """Runs the slow shadow models queued by _ask_models, one question at a time, and records their forecasts."""
+        pending, self._deferred_shadows = self._deferred_shadows, []
+        for question, name, llm, prompt, parse in pending:
+            key = f"{name} (shadow)"
+            try:
+                prediction = await parse(await llm.invoke(prompt))
+            except Exception as exc:
+                logger.warning(f"{key} failed on {question.page_url}: {type(exc).__name__}: {exc}")
+                self.model_failures[key] = self.model_failures.get(key, 0) + 1
+                continue
+            if prediction is None:
+                self.model_failures[key] = self.model_failures.get(key, 0) + 1
+                continue
+            _record(question, name, "shadow", prediction)
 
     # ------------------------------------------------------------------
     # BINARY
