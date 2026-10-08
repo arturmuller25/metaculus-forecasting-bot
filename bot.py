@@ -527,6 +527,12 @@ class ForecasterBot(ForecastBot):
     async def run_deferred_shadows(self) -> None:
         """Runs the slow shadow models queued by _ask_models, one question at a time, and records their forecasts."""
         pending, self._deferred_shadows = self._deferred_shadows, []
+        # A cap per run keeps a burst of new questions from holding up the
+        # next scheduled iteration; the shadow is a sample, not coverage.
+        cap = int((os.getenv("DEFERRED_MAX_PER_RUN") or "").strip() or 4)
+        if len(pending) > cap:
+            logger.info(f"Deferred shadows: running {cap} of {len(pending)} this run")
+            pending = pending[:cap]
         for question, name, llm, prompt, parse in pending:
             key = f"{name} (shadow)"
             try:

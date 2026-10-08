@@ -385,7 +385,13 @@ async def run(mode: str, publish: bool, samples: int, limit: int | None) -> list
             for tid in targets[mode]:
                 open_questions += client.get_all_open_questions_from_tournament(tid)
             due = [q for q in open_questions if _due(q)]
-            print(f"{len(due)} of {len(open_questions)} open questions due for a forecast\n")
+            # Soonest close first, and a cap per run, so a first pass over a
+            # whole tournament spreads over several iterations instead of
+            # holding up the next FutureEval check.
+            due.sort(key=lambda q: q.close_time.timestamp() if q.close_time else float("inf"))
+            cap = int((os.getenv("REFRESH_MAX_PER_RUN") or "").strip() or 8)
+            print(f"{len(due)} of {len(open_questions)} open questions due for a forecast; doing up to {cap}\n")
+            due = due[:cap]
             bot.skip_previously_forecasted_questions = False
             reports = await bot.forecast_questions(due, return_exceptions=True) if due else []
         elif limit is None:

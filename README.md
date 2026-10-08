@@ -98,6 +98,8 @@ All optional; defaults live in `main.py`. See `.env.example`.
 | `DIRECT_ANTHROPIC` | on | `0` sends Claude members through OpenRouter only |
 | `ANTHROPIC_FALLBACK` | on | `0` makes a failed direct Claude call fail instead of retrying through OpenRouter (set by `--claude-only`) |
 | `REFRESH_DAYS` | `14` | age at which a forecast is refreshed in `market_pulse` and `animal_futures` |
+| `REFRESH_MAX_PER_RUN` | `8` | most questions forecast per run in those modes, soonest close first |
+| `DEFERRED_MAX_PER_RUN` | `4` | most deferred shadow calls (the agent) per run |
 | `EXTRA_MODES` | none | GitHub Actions repository variable: modes run with `--claude-only` after each scheduled iteration, e.g. `market_pulse,animal_futures` |
 | `MAX_COST_PER_RUN` | `5.00` | cost cap per run in USD (web search cost is not tracked) |
 | `CALIBRATION_A`, `CALIBRATION_B` | `1.0`, `0.0` | Platt scaling coefficients |
