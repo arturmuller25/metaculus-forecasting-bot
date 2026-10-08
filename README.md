@@ -91,6 +91,8 @@ All optional; defaults live in `main.py`. See `.env.example`.
 | `SHADOW_MODELS` | none | models that forecast every question but are only recorded, never published, as `model[@effort]`, e.g. `openrouter/openai/gpt-5.4` |
 | `RESEARCH_PROVIDERS` | auto | force a provider list, e.g. `asknews,anthropic-search` |
 | `RESOLUTION_FETCH` | on | `0` turns off downloading the resolution sources |
+| `ANTHROPIC_API_KEY` | none | when set, Claude ensemble members are called through the Anthropic API first, with OpenRouter as the fallback |
+| `DIRECT_ANTHROPIC` | on | `0` sends Claude members through OpenRouter only |
 | `MAX_COST_PER_RUN` | `5.00` | cost cap per run in USD (web search cost is not tracked) |
 | `CALIBRATION_A`, `CALIBRATION_B` | `1.0`, `0.0` | Platt scaling coefficients |
 | `NUMERIC_CDF` | `pchip` | how percentiles become the numeric CDF: `pchip`, `pchip-body` or `linear` (the library's) |
@@ -168,6 +170,7 @@ These spend API credits and publish nothing.
 | `numeric_replay.py` | compares the numeric CDF constructions on the bot's own questions |
 | `forecast_replay.py` | replays the forecast step with frozen research on resolved questions, to compare models and prompt variants |
 | `claude_direct_replay.py` | the same replay with Claude models on the Anthropic API (batch, effort levels) |
+| `reconcile_replay.py` | tests a reconciler step that settles member disagreements, on the same replay |
 | `coverage_check.py` | lists recently closed questions the bot did not forecast (runs at the end of each Actions run) |
 | `.github/workflows/forecast.yml` | scheduled runs |
 

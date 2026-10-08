@@ -114,6 +114,40 @@ def _thinker(model: str, temperature: float, timeout: int, effort: str | None = 
         kwargs["reasoning_effort"] = effort
     return GeneralLlm(**kwargs)
 
+class _DirectFirst:
+    """
+    A Claude ensemble member called through the Anthropic API first
+    (ANTHROPIC_API_KEY, the bot maker's own API credit), and through
+    OpenRouter when the direct call fails or that credit runs out. Both routes
+    reason the same at the same effort (measured with claude_direct_replay.py
+    on 56 questions). It keeps the OpenRouter name, so records and comments
+    stay comparable over time.
+    """
+
+    def __init__(self, openrouter_model: str, temperature: float, timeout: int) -> None:
+        self.model = openrouter_model
+        provider, _, name = openrouter_model.removeprefix("openrouter/").partition("/")
+        # OpenRouter writes versions with a dot (claude-opus-5.5), the
+        # Anthropic API with a hyphen (claude-opus-5-5).
+        self._direct = _thinker(f"{provider}/{name.replace('.', '-')}", temperature, timeout)
+        self._backup = _thinker(openrouter_model, temperature, timeout)
+
+    async def invoke(self, prompt: str) -> str:
+        try:
+            return await self._direct.invoke(prompt)
+        except Exception as exc:
+            logger.warning(f"Direct Anthropic call for {self.model} failed ({type(exc).__name__}); using OpenRouter")
+            return await self._backup.invoke(prompt)
+
+
+def _member(model: str):
+    """An ensemble member: Claude models go direct first when an Anthropic key is set (DIRECT_ANTHROPIC=0 turns it off)."""
+    direct = bool(os.getenv("ANTHROPIC_API_KEY", "").strip()) and os.getenv("DIRECT_ANTHROPIC", "").strip() != "0"
+    if direct and model.startswith("openrouter/anthropic/"):
+        return _DirectFirst(model, 0.3, 120)
+    return _thinker(model, 0.3, 120)
+
+
 TOURNAMENT_URLS = {
     "tournament": "https://www.metaculus.com/tournament/fall-futureeval-2026/",
     "minibench": "https://www.metaculus.com/aib/minibench",
@@ -137,12 +171,13 @@ def build_bot(publish: bool, samples: int) -> ForecasterBot:
     ensemble = (
         []
         if os.getenv("ENSEMBLE", "1") == "0"
-        else [_thinker(m, 0.3, 120) for m in _members]
+        else [_member(m) for m in _members]
     )
 
     # Shadow models: forecast every question on the same research, recorded to
     # logs/forecasts.jsonl but never published. SHADOW_MODELS="model[@effort],..."
-    # e.g. "openrouter/openai/gpt-5.4@medium" to test a cheaper forecaster.
+    # e.g. "openrouter/openai/gpt-5.4@medium" to test a cheaper forecaster, or
+    # "anthropic/claude-opus-5-5" for a shadow paid by the Anthropic key.
     shadows = []
     for spec in (s.strip() for s in os.getenv("SHADOW_MODELS", "").split(",")):
         if spec:
