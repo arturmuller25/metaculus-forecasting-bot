@@ -59,6 +59,8 @@ VARIANTS = {
 # question to count as reproduced. Comment values are rounded to 4 digits.
 FIDELITY = 0.01
 LEVELS = [10, 20, 40, 60, 80, 90]
+# The bot has asked for 13 percentiles since 2026-10-09.
+LEVELS_13 = [1, 5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 95, 99]
 
 
 # ---------------------------------------------------------------------------
@@ -67,12 +69,13 @@ LEVELS = [10, 20, 40, 60, 80, 90]
 
 
 def _raw_percentiles(text: str) -> list[tuple[float, float]] | None:
-    """The last complete "Percentile 10: X ... Percentile 90: Y" answer in a text."""
+    """The last complete percentile answer in a text (13 percentiles, or the older 6)."""
     found = re.findall(r"Percentile\s+(\d{1,2})\s*[:=]\s*\$?\s*(-?[\d,]*\.?\d+)", text)
-    for start in range(len(found) - len(LEVELS), -1, -1):
-        block = found[start : start + len(LEVELS)]
-        if [int(p) for p, _ in block] == LEVELS:
-            return [(int(p) / 100, float(v.replace(",", ""))) for p, v in block]
+    for levels in (LEVELS_13, LEVELS):
+        for start in range(len(found) - len(levels), -1, -1):
+            block = found[start : start + len(levels)]
+            if [int(p) for p, _ in block] == levels:
+                return [(int(p) / 100, float(v.replace(",", ""))) for p, v in block]
     return None
 
 

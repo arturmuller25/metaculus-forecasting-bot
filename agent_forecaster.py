@@ -156,15 +156,17 @@ _REPAIR = (
 
 _FORMATS = {
     "binary": 'Probability: ZZ% (one number from 0 to 100)',
-    "numeric": (
-        "Percentile 10: XX\nPercentile 20: XX\nPercentile 40: XX\n"
-        "Percentile 60: XX\nPercentile 80: XX\nPercentile 90: XX"
-    ),
+    "numeric": "\n".join(f"Percentile {p}: XX" for p in (1, 5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 95, 99)),
     "multiple_choice": "<option name>: <probability> for every option, one per line, in the order given",
 }
 
 _BINARY_RE = re.compile(r"Probability\s*:\s*\**\s*\d+(?:\.\d+)?\s*%", re.IGNORECASE)
-_PCT_RE = re.compile(r"Percentile\s*(10|20|40|60|80|90)\s*:\s*\**\s*[-+$]?\s*[\d.,]+", re.IGNORECASE)
+_PCT_RE = re.compile(
+    r"Percentile\s*(10|20|30|40|50|60|70|80|90|95|99|1|5)\s*:\s*\**\s*[-+$]?\s*[\d.,]+", re.IGNORECASE
+)
+# The bot asks for 13 percentiles (1 to 99); older prompts asked for 6.
+_LEVELS_13 = {"1", "5", "10", "20", "30", "40", "50", "60", "70", "80", "90", "95", "99"}
+_LEVELS_6 = {"10", "20", "40", "60", "80", "90"}
 _MC_LINE_RE = re.compile(r"^\s*[-*]*\s*[^:\n]{1,200}:\s*\**\s*\d+(?:\.\d+)?\s*%?\s*\**\s*$")
 _OPTIONS_RE = re.compile(r"The options are:\s*(\[.*?\])\s*$", re.MULTILINE)
 _QUESTION_RE = re.compile(r"Your interview question is:\s*\n\s*(.+)")
@@ -209,14 +211,15 @@ def finish_answer(text: str, prompt: str) -> str | None:
         matches = list(_BINARY_RE.finditer(text))
         return text[: _line_end(text, matches[-1].end())].rstrip() if matches else None
     if kind == "numeric":
+        top, need = ("99", _LEVELS_13) if "Percentile 99:" in prompt else ("90", _LEVELS_6)
         matches = list(_PCT_RE.finditer(text))
-        last90 = [m for m in matches if m.group(1) == "90"]
-        if not last90:
+        last = [m for m in matches if m.group(1) == top]
+        if not last:
             return None
-        end = _line_end(text, last90[-1].end())
-        block = text[max(0, end - 1500): end]
+        end = _line_end(text, last[-1].end())
+        block = text[max(0, end - 2500): end]
         found = {m.group(1) for m in _PCT_RE.finditer(block)}
-        return text[:end].rstrip() if found >= {"10", "20", "40", "60", "80", "90"} else None
+        return text[:end].rstrip() if found >= need else None
     if kind == "multiple_choice":
         # The last run of "<name>: <number>" lines must cover every option.
         lines = text.splitlines()

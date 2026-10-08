@@ -797,15 +797,27 @@ class ForecasterBot(ForecastBot):
 
             The last thing you write is your final answer as:
             "
-            Percentile 10: XX (lowest number value)
+            Percentile 1: XX (lowest number value)
+            Percentile 5: XX
+            Percentile 10: XX
             Percentile 20: XX
+            Percentile 30: XX
             Percentile 40: XX
+            Percentile 50: XX
             Percentile 60: XX
+            Percentile 70: XX
             Percentile 80: XX
-            Percentile 90: XX (highest number value)
+            Percentile 90: XX
+            Percentile 95: XX
+            Percentile 99: XX (highest number value)
             "
             """
         )
+        # 13 percentiles instead of 6 since 2026-10-09: on the MiniBench round 1
+        # replay (numeric_rules_replay.py) the pair scored +3.32 per question
+        # (90% CI +0.46 to +6.36), expected nearer 0 to 2 after checks for
+        # selection and noise; explicit tails matter most with PCHIP and the
+        # 15% widening. Re-measure on round 2 and revert if it does not hold.
 
         parsing_instructions = clean_indents(
             f"""
