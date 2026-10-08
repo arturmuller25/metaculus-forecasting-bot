@@ -91,6 +91,9 @@ jobs:
           EXA_API_KEY: ${{ secrets.EXA_API_KEY }}
           PERPLEXITY_API_KEY: ${{ secrets.PERPLEXITY_API_KEY }}
           SHADOW_MODELS: ${{ vars.SHADOW_MODELS }}
+          # Tournaments outside FutureEval, run Claude-only (Anthropic key),
+          # comma-separated modes, e.g. "market_pulse,animal_futures".
+          EXTRA_MODES: ${{ vars.EXTRA_MODES }}
         run: |
           set -uo pipefail
           if [ "${{ github.event_name }}" = "schedule" ]; then
@@ -127,6 +130,11 @@ jobs:
             # A failed iteration (network, rate limit, one bad question) must
             # not stop the loop; the next cycle tries again.
             uv run python main.py $ARGS || echo "iteration $ITER failed, continuing"
+            if [ "$PUBLISH" = "true" ] && [ -n "${EXTRA_MODES:-}" ] && [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+              for EXTRA in $(echo "$EXTRA_MODES" | tr ',' ' '); do
+                uv run python main.py --mode "$EXTRA" --publish --claude-only || echo "extra mode $EXTRA failed, continuing"
+              done
+            fi
             echo "::endgroup::"
             NOW=$(date +%s)
             if [ $((NOW - START + PAUSE)) -ge $CAP ]; then

@@ -136,6 +136,10 @@ class _DirectFirst:
         try:
             return await self._direct.invoke(prompt)
         except Exception as exc:
+            # ANTHROPIC_FALLBACK=0 (the Claude-only runs) keeps every call off
+            # the OpenRouter key: the member fails instead.
+            if os.getenv("ANTHROPIC_FALLBACK", "").strip() == "0":
+                raise
             logger.warning(f"Direct Anthropic call for {self.model} failed ({type(exc).__name__}); using OpenRouter")
             return await self._backup.invoke(prompt)
 
@@ -153,14 +157,22 @@ TOURNAMENT_URLS = {
     "minibench": "https://www.metaculus.com/aib/minibench",
     "cup": "https://www.metaculus.com/tournament/metaculus-cup/",
     "market_pulse": "https://www.metaculus.com/tournament/market-pulse-26q4/",
+    "animal_futures": "https://www.metaculus.com/notebooks/43978/",
     "test": "https://www.metaculus.com/tournament/bot-testing-area/",
 }
 
 
 def build_bot(publish: bool, samples: int) -> ForecasterBot:
+    researcher = _thinker(RESEARCH_MODEL, 0.1, 180, effort=RESEARCH_REASONING)
+    if RESEARCH_MODEL.startswith("anthropic/"):
+        # Claude through the Anthropic API searches the web with its own tool.
+        researcher = GeneralLlm(
+            model=RESEARCH_MODEL, temperature=0.1, timeout=180, allowed_tries=2,
+            reasoning_effort=RESEARCH_REASONING, web_search_options={"search_context_size": "medium"},
+        )
     llms = {
         "default": _thinker(FORECAST_MODEL, 0.3, 120),
-        "researcher": _thinker(RESEARCH_MODEL, 0.1, 180, effort=RESEARCH_REASONING),
+        "researcher": researcher,
         "parser": GeneralLlm(model=PARSER_MODEL, temperature=0.0, timeout=60, allowed_tries=2),
         "summarizer": GeneralLlm(model=PARSER_MODEL, temperature=0.0, timeout=60),
     }
@@ -292,6 +304,47 @@ def _pick(questions: list, limit: int) -> list:
     return picked
 
 
+# Tournaments where the bot competes with humans and may update its
+# forecasts. Market Pulse scores the forecast standing at each question's
+# close; Animal Futures averages scores over time. Both reward a fresh
+# forecast near the close and a first forecast early.
+REFRESHED_MODES = ("market_pulse", "animal_futures")
+REFRESH_DAYS = float(os.getenv("REFRESH_DAYS", "") or 14)
+
+
+def _due(question) -> bool:
+    """New question, a forecast older than REFRESH_DAYS, or within 2 days of closing with a forecast older than 12 hours."""
+    from datetime import datetime, timezone
+
+    try:
+        last = question.timestamp_of_my_last_forecast
+    except ValueError:
+        last = None
+    if last is None:
+        return True
+    now = datetime.now(timezone.utc)
+    age_hours = (now - last).total_seconds() / 3600
+    close = question.close_time
+    if close is not None and (close - now).total_seconds() <= 2 * 86400:
+        return age_hours > 12
+    return age_hours > REFRESH_DAYS * 24
+
+
+# Everything through the Anthropic API (the bot maker's own credit) and free
+# sources, with no OpenRouter call: for tournaments outside FutureEval, which
+# the tournament-funded key is not meant for.
+CLAUDE_ONLY = {
+    "FORECAST_MODEL": "anthropic/claude-sonnet-5",
+    "RESEARCH_MODEL": "anthropic/claude-sonnet-5",
+    "PARSER_MODEL": "anthropic/claude-haiku-4-5",
+    "ENSEMBLE_MODELS": "openrouter/anthropic/claude-sonnet-5,openrouter/anthropic/claude-opus-5.5",
+    "RESEARCH_PROVIDERS": "asknews",
+    "SHADOW_MODELS": "",
+    "DIRECT_ANTHROPIC": "1",
+    "ANTHROPIC_FALLBACK": "0",
+}
+
+
 async def run(mode: str, publish: bool, samples: int, limit: int | None) -> list:
     bot = build_bot(publish, samples)
     client = MetaculusClient()
@@ -301,6 +354,7 @@ async def run(mode: str, publish: bool, samples: int, limit: int | None) -> list
         "minibench": [client.CURRENT_MINIBENCH_ID],
         "cup": [client.CURRENT_METACULUS_CUP_ID],
         "market_pulse": [client.CURRENT_MARKET_PULSE_ID],
+        "animal_futures": [33016],
         "test": ["bot-testing-area"],
     }
     if mode not in targets:
@@ -313,7 +367,17 @@ async def run(mode: str, publish: bool, samples: int, limit: int | None) -> list
     # The parameter is hard_limit, not max_cost (the library README is out of
     # date). It raises when the cap is exceeded.
     with MonetaryCostManager(hard_limit=MAX_COST_PER_RUN) as cost:
-        if limit is None:
+        if mode in REFRESHED_MODES and limit is None:
+            # Tournaments open to humans allow updates: forecast new questions
+            # and refresh old forecasts (see _due).
+            open_questions = []
+            for tid in targets[mode]:
+                open_questions += client.get_all_open_questions_from_tournament(tid)
+            due = [q for q in open_questions if _due(q)]
+            print(f"{len(due)} of {len(open_questions)} open questions due for a forecast\n")
+            bot.skip_previously_forecasted_questions = False
+            reports = await bot.forecast_questions(due, return_exceptions=True) if due else []
+        elif limit is None:
             reports = []
             for tid in targets[mode]:
                 reports += await bot.forecast_on_tournament(tid, return_exceptions=True)
@@ -395,9 +459,14 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Metaculus forecasting bot")
     parser.add_argument(
         "--mode",
-        choices=["test", "tournament", "minibench", "cup", "market_pulse"],
+        choices=["test", "tournament", "minibench", "cup", "market_pulse", "animal_futures"],
         default="test",
         help="where to forecast (default: test, the bot testing area)",
+    )
+    parser.add_argument(
+        "--claude-only",
+        action="store_true",
+        help="use only the Anthropic API (ANTHROPIC_API_KEY) and free sources, never the OpenRouter key",
     )
     parser.add_argument(
         "--publish",
@@ -428,7 +497,18 @@ def main() -> None:
     )
 
     check_env(args.publish)
-    use_fallback_key_if_low()
+    if args.claude_only:
+        if not os.getenv("ANTHROPIC_API_KEY", "").strip():
+            print("--claude-only needs ANTHROPIC_API_KEY.", file=sys.stderr)
+            sys.exit(1)
+        global FORECAST_MODEL, RESEARCH_MODEL, PARSER_MODEL
+        os.environ.update(CLAUDE_ONLY)
+        FORECAST_MODEL = CLAUDE_ONLY["FORECAST_MODEL"]
+        RESEARCH_MODEL = CLAUDE_ONLY["RESEARCH_MODEL"]
+        PARSER_MODEL = CLAUDE_ONLY["PARSER_MODEL"]
+        print("Claude only: Anthropic API and free sources, no OpenRouter calls.\n")
+    else:
+        use_fallback_key_if_low()
 
     print(f"Mode      : {args.mode}")
     print(f"Model     : {FORECAST_MODEL}")
