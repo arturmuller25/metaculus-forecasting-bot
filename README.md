@@ -167,6 +167,7 @@ These spend API credits and publish nothing.
 | `analyze_results.py` | scores resolved forecasts, overall and per model |
 | `numeric_replay.py` | compares the numeric CDF constructions on the bot's own questions |
 | `forecast_replay.py` | replays the forecast step with frozen research on resolved questions, to compare models and prompt variants |
+| `claude_direct_replay.py` | the same replay with Claude models on the Anthropic API (batch, effort levels) |
 | `coverage_check.py` | lists recently closed questions the bot did not forecast (runs at the end of each Actions run) |
 | `.github/workflows/forecast.yml` | scheduled runs |
 
