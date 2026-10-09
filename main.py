@@ -521,11 +521,14 @@ def main() -> None:
         if not os.getenv("ANTHROPIC_API_KEY", "").strip():
             print("--claude-only needs ANTHROPIC_API_KEY.", file=sys.stderr)
             sys.exit(1)
-        global FORECAST_MODEL, RESEARCH_MODEL, PARSER_MODEL
+        global FORECAST_MODEL, RESEARCH_MODEL, PARSER_MODEL, MAX_COST_PER_RUN
         os.environ.update(CLAUDE_ONLY)
         FORECAST_MODEL = CLAUDE_ONLY["FORECAST_MODEL"]
         RESEARCH_MODEL = CLAUDE_ONLY["RESEARCH_MODEL"]
         PARSER_MODEL = CLAUDE_ONLY["PARSER_MODEL"]
+        # The $5 cap protects the tournament key; eight Claude-only questions
+        # cost about that much, and the Anthropic credit has its own limit.
+        MAX_COST_PER_RUN = max(MAX_COST_PER_RUN, 15.0)
         print("Claude only: Anthropic API and free sources, no OpenRouter calls.\n")
     else:
         use_fallback_key_if_low()
