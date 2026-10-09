@@ -42,8 +42,9 @@ jobs:
   forecast:
     # Pinned: ubuntu-latest moves to Ubuntu 26 from 2026-10-19, mid-season.
     runs-on: ubuntu-24.04
-    # GitHub's hard limit is 360 minutes. The loop stops by itself at about
-    # 330; this only matters if a forecast hangs.
+    # GitHub's hard limit is 360 minutes. The loop stops starting
+    # iterations at 280 minutes and the bot step has its own 340-minute
+    # limit, so the closing steps (coverage check, records) always run.
     timeout-minutes: 355
     permissions:
       contents: read
@@ -72,6 +73,7 @@ jobs:
         run: uv sync --frozen
 
       - name: Run the bot
+        timeout-minutes: 340
         env:
           METACULUS_TOKEN: ${{ secrets.METACULUS_TOKEN }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
@@ -119,9 +121,13 @@ jobs:
             exit $?
           fi
 
-          # ---- loop for 5.5 hours, forecasting every 20 minutes ----
+          # ---- loop for about 5 hours, forecasting every 20 minutes ----
+          # Each call has a time limit, so a hung process (seen on 2026-10-09)
+          # is killed and the loop goes on: 25 minutes for the main call, 15
+          # for each extra tournament. The last iteration starts by 280
+          # minutes, so even the slowest one ends before the step's limit.
           START=$(date +%s)
-          CAP=$((5 * 3600 + 30 * 60))
+          CAP=$((4 * 3600 + 40 * 60))
           PAUSE=$((20 * 60))
           ITER=0
           while :; do
@@ -129,10 +135,10 @@ jobs:
             echo "::group::iteration $ITER  ($(date -u +%H:%M:%S) UTC)"
             # A failed iteration (network, rate limit, one bad question) must
             # not stop the loop; the next cycle tries again.
-            uv run python main.py $ARGS || echo "iteration $ITER failed, continuing"
+            timeout 1500 uv run python main.py $ARGS || echo "iteration $ITER failed or timed out, continuing"
             if [ "$PUBLISH" = "true" ] && [ -n "${EXTRA_MODES:-}" ] && [ -n "${ANTHROPIC_API_KEY:-}" ]; then
               for EXTRA in $(echo "$EXTRA_MODES" | tr ',' ' '); do
-                uv run python main.py --mode "$EXTRA" --publish --claude-only || echo "extra mode $EXTRA failed, continuing"
+                timeout 900 uv run python main.py --mode "$EXTRA" --publish --claude-only || echo "extra mode $EXTRA failed or timed out, continuing"
               done
             fi
             echo "::endgroup::"

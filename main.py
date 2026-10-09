@@ -549,3 +549,12 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+    # The Anthropic SDK used by the agentic forecaster leaves an idle anyio
+    # worker thread (not a daemon) whose stop callback never runs, so the
+    # interpreter waits for it forever after main() returns. On 2026-10-09
+    # two GitHub runs hung for hours after their last forecast and a question
+    # was missed. Everything is written by now: flush and exit explicitly.
+    logging.shutdown()
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(0)
