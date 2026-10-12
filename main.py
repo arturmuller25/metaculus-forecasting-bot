@@ -342,14 +342,17 @@ def _due(question) -> bool:
 
 
 # Everything through the Anthropic API (the bot maker's own credit) and free
-# sources, with no OpenRouter call: for tournaments outside FutureEval, which
-# the tournament-funded key is not meant for.
+# sources, with no OpenRouter call and no AskNews: for tournaments outside
+# FutureEval, which the tournament-funded key and the sponsored AskNews plan
+# are not meant for (Metaculus asked to keep its key on FutureEval and
+# MiniBench, 2026-10-12). "none" matches no provider, so research is Claude's
+# web search plus the resolution source download.
 CLAUDE_ONLY = {
     "FORECAST_MODEL": "anthropic/claude-sonnet-5",
     "RESEARCH_MODEL": "anthropic/claude-sonnet-5",
     "PARSER_MODEL": "anthropic/claude-haiku-4-5",
     "ENSEMBLE_MODELS": "openrouter/anthropic/claude-sonnet-5,openrouter/anthropic/claude-opus-5.5",
-    "RESEARCH_PROVIDERS": "asknews",
+    "RESEARCH_PROVIDERS": "none",
     "SHADOW_MODELS": "",
     "DIRECT_ANTHROPIC": "1",
     "ANTHROPIC_FALLBACK": "0",
