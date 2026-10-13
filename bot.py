@@ -16,11 +16,13 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import os
 import re
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
 
+import numpy as np
 from forecasting_tools import (
     BinaryPrediction,
     BinaryQuestion,
@@ -38,7 +40,10 @@ from forecasting_tools import (
     structure_output,
 )
 
+import evidence_packet
 from calibration import apply_platt
+from market_baseline import baseline_for_question as market_baseline_of
+from market_baseline import block_for_question as market_block
 from numeric_cdf import SmoothDistribution
 from resolution_fetch import fetch_resolution_sources
 
@@ -68,6 +73,19 @@ def _trimmed_mean(values: list[float]) -> float:
         return vs[mid] if n % 2 else (vs[mid - 1] + vs[mid]) / 2
     middle = vs[1:-1]
     return sum(middle) / len(middle)
+
+
+def _logodds_mean(values: list[float]) -> float:
+    """
+    Mean in log-odds (the geometric mean of the odds), each value clipped to
+    1%..99% first. When members agree on the side it lands a little further
+    from 50% than the plain mean. Replays of MiniBench round 1 (seats_replay.py)
+    scored it 0.3 to 0.6 points per binary question above the plain mean,
+    better on 24 or 25 of 29 questions.
+    """
+    clipped = [min(0.99, max(0.01, v)) for v in values]
+    z = sum(math.log(v / (1 - v)) for v in clipped) / len(clipped)
+    return 1 / (1 + math.exp(-z))
 
 
 # Every model's forecast, one JSON object per line, for scoring once questions
@@ -178,9 +196,16 @@ class ForecasterBot(ForecastBot):
         *args,
         ensemble: list[GeneralLlm] | None = None,
         shadows: list[tuple[str, GeneralLlm]] | None = None,
+        packet_llm: GeneralLlm | None = None,
         **kwargs,
     ) -> None:
         super().__init__(*args, **kwargs)
+
+        # Evidence packet (evidence_packet.py): one call that sorts, dates and
+        # grades the research before the forecasters read it. None = off.
+        self._packet_llm = packet_llm
+        # How binary members are combined: "mean" (default) or "logodds".
+        self._binary_pool = os.getenv("BINARY_POOL", "mean").strip().lower() or "mean"
 
         # Shadow models answer every question alongside the ensemble but are
         # only recorded to FORECAST_LOG, never aggregated or published. They
@@ -430,14 +455,26 @@ class ForecasterBot(ForecastBot):
                     return ""
                 return await asyncio.to_thread(fetch_resolution_sources, question)
 
+            # Market-series questions (two assets' return gap, the VIX's
+            # maximum, a yield or spread at a date) get the distribution a
+            # random walk at today's volatility gives, computed in code from
+            # market data (market_baseline.py). MARKET_BASELINE=0 turns it off.
+            async def market() -> str:
+                if os.getenv("MARKET_BASELINE", "1").strip() == "0":
+                    return ""
+                return await asyncio.to_thread(market_block, question)
+
             blocks = await asyncio.gather(
                 primary(),
                 fetched(),
+                market(),
                 *(self._provider(name, question, prompt) for name in self._research_providers),
                 return_exceptions=True,
             )
             parts, sizes = [], []
-            labels = ["Primary web research", "Resolution source download"] + list(self._research_providers)
+            labels = ["Primary web research", "Resolution source download", "Market statistics"] + list(
+                self._research_providers
+            )
             for label, b in zip(labels, blocks):
                 if isinstance(b, Exception):
                     logger.warning(f"Research provider {label} failed: {type(b).__name__}: {b}")
@@ -445,8 +482,9 @@ class ForecasterBot(ForecastBot):
                 text = (b or "").strip()
                 sizes.append(f"{label} {len(text)}")
                 if not text:
-                    # No URL in the criteria is normal for the download step.
-                    if label != "Resolution source download":
+                    # No URL in the criteria, or a question that is not about a
+                    # market series, is normal for these two steps.
+                    if label not in ("Resolution source download", "Market statistics"):
                         logger.warning(f"Research provider {label} returned nothing for {question.page_url}")
                     continue
                 parts.append(f"## Source: {label}\n{text}")
@@ -466,6 +504,11 @@ class ForecasterBot(ForecastBot):
                 f"resolution source opened in {opened} block(s); "
                 f"criteria URLs downloaded {downloaded}, not read {missed}"
             )
+            if self._packet_llm is not None and research:
+                try:
+                    research = research + "\n\n" + await evidence_packet.build(self._packet_llm, question, research)
+                except Exception as exc:  # noqa: BLE001 - the research stands without it
+                    logger.warning(f"Evidence packet failed for {question.page_url}: {type(exc).__name__}: {exc}")
             logger.info(f"Research for {question.page_url} ({len(parts)} sources):\n{research}")
             return research
 
@@ -624,7 +667,7 @@ class ForecasterBot(ForecastBot):
             return ReasonedPrediction(prediction_value=value, reasoning=text)
 
         values = [p for _, p, _ in answers]
-        consensus = _trimmed_mean(values)
+        consensus = _logodds_mean(values) if self._binary_pool == "logodds" else _trimmed_mean(values)
         if max(values) - min(values) >= 0.30:
             logger.warning(
                 f"Members disagree by {max(values) - min(values):.0%} on {question.page_url}: "
@@ -871,12 +914,14 @@ class ForecasterBot(ForecastBot):
         answers = await self._ask_models(question, prompt, parse)
         if len(answers) == 1:
             _, prediction, text = answers[0]
+            prediction, note = await self._blend_market_baseline(question, prediction)
             logger.info(f"Forecast {question.page_url}: {prediction.declared_percentiles}")
-            return ReasonedPrediction(prediction_value=prediction, reasoning=text)
+            return ReasonedPrediction(prediction_value=prediction, reasoning=note + text)
 
         # The library's own rule for combining samples: the pointwise median of
         # the CDFs, which for two models is their average.
         combined = await super()._aggregate_predictions([p for _, p, _ in answers], question)
+        combined, note = await self._blend_market_baseline(question, combined)
 
         def fmt(dist: NumericDistribution) -> str:
             return " | ".join(
@@ -888,7 +933,57 @@ class ForecasterBot(ForecastBot):
             f"P{round(q * 100)} {_fmt_num(_quantile(combined, q))}" for q in (0.1, 0.5, 0.9)
         )
         logger.info(f"{question.page_url}: {summary}")
-        return ReasonedPrediction(prediction_value=combined, reasoning=f"{summary}\n\n{details}")
+        return ReasonedPrediction(prediction_value=combined, reasoning=f"{note}{summary}\n\n{details}")
+
+    async def _blend_market_baseline(
+        self, question: NumericQuestion, forecast: NumericDistribution
+    ) -> tuple[NumericDistribution, str]:
+        """
+        On market-series questions (market_baseline.py), publishes a mixture of
+        the members' CDF and the statistical baseline's CDF, with the
+        baseline's share set by MARKET_BASELINE_WEIGHT (default 0.8, 0 = off).
+        On 96 resolved Market Pulse questions (market_backtest.py), Claude
+        Sonnet 5 scored 4.2 points per question below the baseline alone with
+        only the latest prices and 1.6 below with the baseline in its research;
+        mixtures with 80% to 90% baseline tied the baseline alone. The 20% left
+        to the models is room for scheduled events, which that test lacked.
+        Returns the distribution to publish and a line for the comment.
+        """
+        weight = _env_float("MARKET_BASELINE_WEIGHT", 0.8)
+        if weight <= 0:
+            return forecast, ""
+        try:
+            baseline = await asyncio.to_thread(market_baseline_of, question)
+        except Exception as exc:  # noqa: BLE001 - the members' forecast stands
+            logger.warning(f"Market baseline failed for {question.page_url}: {type(exc).__name__}: {exc}")
+            return forecast, ""
+        if baseline is None:
+            return forecast, ""
+        weight = min(1.0, weight)
+        base = SmoothDistribution.build(
+            [Percentile(percentile=p / 100, value=v) for p, v in baseline.percentiles.items()],
+            question, method=self._cdf_method, widen=1.0,
+        )
+        grid = base.get_cdf()
+        xs = np.array([p.value for p in grid])
+        mixed = (1 - weight) * np.array([p.percentile for p in forecast.get_cdf()]) + weight * np.array(
+            [p.percentile for p in grid]
+        )
+        # Back to percentiles on a fine grid, rebuilt with the same smooth CDF.
+        levels = [0.01, 0.025, 0.05] + [round(0.1 * k, 2) for k in range(1, 10)] + [0.95, 0.975, 0.99]
+        points = []
+        for level in levels:
+            value = float(np.interp(level, mixed, xs))
+            if points and value <= points[-1].value:
+                continue
+            points.append(Percentile(percentile=level, value=value))
+        blended = SmoothDistribution.build(points, question, method=self._cdf_method, widen=1.0)
+        note = (
+            f"Published as a mixture: {round(100 * weight)}% statistical baseline from market data,"
+            f" {round(100 * (1 - weight))}% the models' forecast.\n\n"
+        )
+        logger.info(f"Market baseline blended at {weight:.0%} on {question.page_url}")
+        return blended, note
 
     def _bound_messages(self, question: NumericQuestion) -> tuple[str, str]:
         upper = (

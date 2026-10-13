@@ -104,6 +104,8 @@ REASONING_EFFORT = os.getenv("REASONING_EFFORT", "high").strip()
 # on 3 questions (gpt-5.4): low, medium and high cost $0.30, $0.49 and $0.59
 # per call in tokens, and higher effort did not return richer research.
 RESEARCH_REASONING = os.getenv("RESEARCH_REASONING", "low").strip()
+# Model that writes the evidence packet when EVIDENCE_PACKET=1.
+PACKET_MODEL = "openrouter/openai/gpt-5.6-sol"
 
 
 def _thinker(model: str, temperature: float, timeout: int, effort: str | None = None) -> GeneralLlm:
@@ -207,9 +209,18 @@ def build_bot(publish: bool, samples: int) -> ForecasterBot:
         model, _, effort = spec.partition("@")
         shadows.append((spec, _thinker(model.strip(), 0.3, 120, effort=effort.strip() or None)))
 
+    # Evidence packet (evidence_packet.py): one call per question at low
+    # effort that sorts and dates the research. On MiniBench round 1 replays
+    # with frozen research it added 2.0 points per question (90% interval
+    # +0.8 to +3.2; numeric +3.2, binary +0.7). EVIDENCE_PACKET=0 turns it off.
+    packet_llm = None
+    if os.getenv("EVIDENCE_PACKET", "1").strip() != "0":
+        packet_llm = _thinker(os.getenv("PACKET_MODEL", "").strip() or PACKET_MODEL, 0.1, 120, effort="low")
+
     return ForecasterBot(
         ensemble=ensemble,
         shadows=shadows,
+        packet_llm=packet_llm,
         # One research report per question, `samples` forecasts on it.
         research_reports_per_question=1,
         predictions_per_research_report=samples,
@@ -356,6 +367,8 @@ CLAUDE_ONLY = {
     "SHADOW_MODELS": "",
     "DIRECT_ANTHROPIC": "1",
     "ANTHROPIC_FALLBACK": "0",
+    # The packet was tested with GPT-5.6 Sol as its writer only.
+    "EVIDENCE_PACKET": "0",
 }
 
 

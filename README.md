@@ -17,11 +17,20 @@ skipped):
    Exa or Perplexity when their API keys are set. The pages and data files
    named in the resolution criteria are also downloaded by code, without an
    LLM (`resolution_fetch.py`), so the forecasters see the source itself.
+   A last call turns all of it into an evidence packet: how the question
+   resolves, up to 12 dated items with what each establishes and what it does
+   not, conflicts and missing facts (`evidence_packet.py`).
+   Questions on a market series (two assets' return gap, the VIX's maximum,
+   a yield or a credit spread over a window) also get a statistical baseline
+   computed from market data (`market_baseline.py`).
 2. **Forecast.** Two models from different families (GPT-6.1 Sol and Claude
    Sonnet 5) forecast every question from the same briefing. Binary
    probabilities are averaged, multiple-choice probabilities are averaged per
    option, and numeric and discrete distributions are combined by the
-   pointwise median of their CDFs.
+   pointwise median of their CDFs. On market-series questions the published
+   CDF is 80% the statistical baseline and 20% the models: on 96 resolved
+   Market Pulse questions the baseline alone beat Claude's own forecasts
+   (`market_backtest.py`).
 3. **Calibrate.** Optional Platt scaling on binary forecasts (off by default).
 4. **Publish.** The forecast is submitted together with a private comment
    containing each model's forecast and reasoning.
@@ -74,7 +83,7 @@ Without `--publish` the bot runs the full pipeline but submits nothing.
 | `--publish` | submit forecasts and comments to Metaculus |
 | `--limit N` | forecast at most N questions, alternating question types |
 | `--samples N` | run the forecast step N times per question (default 1) |
-| `--claude-only` | use only the Anthropic API and free sources (AskNews, the resolution source download), never the OpenRouter key: Claude Sonnet 5 researches with its web search tool, Sonnet 5 and Opus 5.5 forecast |
+| `--claude-only` | use only the Anthropic API and free sources (the resolution source download, market data), never the OpenRouter key or the sponsored AskNews plan: Claude Sonnet 5 researches with its web search tool, Sonnet 5 and Opus 5.5 forecast |
 
 In `market_pulse` and `animal_futures`, tournaments where bots compete with people and may update, the bot forecasts new questions and refreshes a forecast older than `REFRESH_DAYS` (default 14), or older than 12 hours within 2 days of the question's close.
 
@@ -94,6 +103,11 @@ All optional; defaults live in `main.py`. See `.env.example`.
 | `SHADOW_MODELS` | none | models that forecast every question but are only recorded, never published, as `model[@effort]`, e.g. `openrouter/openai/gpt-5.4` |
 | `RESEARCH_PROVIDERS` | auto | force a provider list, e.g. `asknews,anthropic-search` |
 | `RESOLUTION_FETCH` | on | `0` turns off downloading the resolution sources |
+| `MARKET_BASELINE` | on | `0` turns off the market statistics block in the research |
+| `MARKET_BASELINE_WEIGHT` | `0.8` | share of the statistical baseline in the published CDF of market-series questions; `0` publishes the models' forecast only |
+| `BINARY_POOL` | `mean` | how binary members are combined: `mean`, or `logodds` (the mean in log-odds) |
+| `EVIDENCE_PACKET` | on (off with `--claude-only`) | one call per question that sorts, dates and grades the research before the forecasters read it (`evidence_packet.py`); `0` turns it off |
+| `PACKET_MODEL` | `openrouter/openai/gpt-5.6-sol` | model that writes the evidence packet, at low effort |
 | `ANTHROPIC_API_KEY` | none | when set, Claude ensemble members are called through the Anthropic API first, with OpenRouter as the fallback |
 | `DIRECT_ANTHROPIC` | on | `0` sends Claude members through OpenRouter only |
 | `ANTHROPIC_FALLBACK` | on | `0` makes a failed direct Claude call fail instead of retrying through OpenRouter (set by `--claude-only`) |
@@ -174,6 +188,8 @@ These spend API credits and publish nothing.
 | `calibration.py` | Platt scaling and coefficient fitting |
 | `numeric_cdf.py` | alternative ways to build a numeric CDF from percentiles |
 | `resolution_fetch.py` | downloads the pages and data files named in the resolution criteria |
+| `market_baseline.py` | statistical baselines for market-series questions (filtered historical simulation on Yahoo Finance and FRED data) |
+| `evidence_packet.py` | optional step that turns the research into a dated evidence packet |
 | `agent_forecaster.py` | agentic forecaster on the Anthropic API (web search, page reading, code execution), used as a shadow with `SHADOW_MODELS=agent/claude-sonnet-5@high`; it runs after the forecasts are published |
 | `agent_test.py` | dry-run test of the agentic forecaster on recent questions |
 | `analyze_results.py` | scores resolved forecasts, overall and per model |
@@ -183,6 +199,8 @@ These spend API credits and publish nothing.
 | `reconcile_replay.py` | tests a reconciler step that settles member disagreements, on the same replay |
 | `numeric_rules_replay.py` | tests numeric prompt rules (floors, more percentiles) on the same replay |
 | `forecastbench_calibration.py` | measures calibration and the value of a market price in the prompt on resolved ForecastBench questions |
+| `market_backtest.py` | scores the market baseline, and Claude with and without it, on resolved Market Pulse questions |
+| `seats_replay.py` | scores ensembles of different sizes and aggregation rules from recorded replay answers, without new calls |
 | `coverage_check.py` | lists recently closed questions the bot did not forecast (runs at the end of each Actions run) |
 | `.github/workflows/forecast.yml` | scheduled runs |
 

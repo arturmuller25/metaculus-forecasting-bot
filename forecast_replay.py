@@ -148,7 +148,20 @@ V3 = [(
     "When the research gives a base rate for this exact kind of event, start from it and move"
     " away only with case-specific evidence.",
 )]
-VARIANTS = {"base": [], "V1": V1, "V2": V2, "V3": V3, "V4": V1 + V2 + V3}
+VARIANTS = {"base": [], "V1": V1, "V2": V2, "V3": V3, "V4": V1 + V2 + V3, "P": []}
+# Variants that change the research instead of the prompt: "P" appends the
+# evidence packet built by `packets` (evidence_packet.py) to the research.
+PACKET_VARIANTS = {"P"}
+PACKETS = os.path.join(OUT, "packets")
+PACKET_MODEL = "openrouter/openai/gpt-5.6-sol"
+
+
+def packet_for(post_id: int) -> str:
+    path = os.path.join(PACKETS, f"{post_id}.md")
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"no evidence packet for {post_id}; run `packets` first")
+    with open(path, encoding="utf-8") as fh:
+        return fh.read()
 
 
 class PromptEditError(RuntimeError):
@@ -544,7 +557,10 @@ async def run_jobs(jobs: list[tuple[dict, str, str, int]]) -> None:
             question = question_object(row)
             status, prediction, error = "ok", None, None
             try:
-                result = await forecast_once(bots[(alias, variant)], question, row["research"])
+                research = row["research"]
+                if variant in PACKET_VARIANTS:
+                    research = research + "\n\n" + packet_for(row["post_id"])
+                result = await forecast_once(bots[(alias, variant)], question, research)
                 prediction = serialize(result.prediction_value)
             except Exception as exc:  # noqa: BLE001
                 status = "stopped" if STOP.is_set() else "failed"
@@ -615,6 +631,45 @@ def cmd_run(args) -> None:
     print(f"Key: ${remaining:.2f} left, ${drop:.2f} spent since the baseline")
     if STOP.is_set():
         print("STOPPED: spending cap reached.")
+
+
+def cmd_packets(args) -> None:
+    """Builds the evidence packet of every resolved question once (one call each)."""
+    import evidence_packet
+
+    os.makedirs(PACKETS, exist_ok=True)
+    rows = [r for r in load_questions() if r["outcome"] is not None]
+    todo = [r for r in rows if not os.path.exists(os.path.join(PACKETS, f"{r['post_id']}.md"))]
+    remaining, drop = log_reading(f"{args.label} packets start")
+    print(f"{len(todo)} packets to build; key ${remaining:.2f} left, ${drop:.2f} spent since the baseline")
+    if drop >= SPEND_CAP or remaining < KEY_FLOOR:
+        raise SystemExit("Cap already reached; nothing run.")
+    llm = main._thinker(PACKET_MODEL, 0.1, FORECAST_TIMEOUT, effort="low")
+
+    async def one(row: dict) -> None:
+        call: dict = {}
+        _CALL.set(call)
+        try:
+            text = await evidence_packet.build(llm, question_object(row), row["research"])
+        except Exception as exc:  # noqa: BLE001
+            print(f"  {row['post_id']}: failed {type(exc).__name__}: {str(exc)[:200]}")
+            return
+        with open(os.path.join(PACKETS, f"{row['post_id']}.md"), "w", encoding="utf-8") as fh:
+            fh.write(text)
+        print(f"  {row['post_id']}: {len(text)} chars")
+
+    async def go() -> None:
+        sem = asyncio.Semaphore(IN_FLIGHT)
+
+        async def guarded(row):
+            async with sem:
+                await one(row)
+
+        await asyncio.gather(*(guarded(r) for r in todo))
+
+    asyncio.run(go())
+    remaining, drop = log_reading(f"{args.label} packets end")
+    print(f"Key: ${remaining:.2f} left, ${drop:.2f} spent since the baseline")
 
 
 def cmd_check_prompts(_args) -> None:
@@ -1000,13 +1055,16 @@ def main_cli() -> None:
     run.add_argument("--rep", type=int, default=1, help="repeat number, to ask the same configuration again")
     run.add_argument("--retry-failed", action="store_true")
     run.add_argument("--label", default="run", help="label for the balance readings")
+    packets = sub.add_parser("packets", help="build the evidence packet of every resolved question (one call each)")
+    packets.add_argument("--label", default="packets", help="label for the balance readings")
     sub.add_parser("analyze", help="score everything recorded (no LLM calls)")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.WARNING, format="%(asctime)s | %(levelname)s | %(name)s | %(message)s", datefmt="%H:%M:%S")
     logger.setLevel(logging.INFO)
     os.makedirs(OUT, exist_ok=True)
-    {"prepare": cmd_prepare, "check-prompts": cmd_check_prompts, "run": cmd_run, "analyze": cmd_analyze}[args.command](args)
+    {"prepare": cmd_prepare, "check-prompts": cmd_check_prompts, "run": cmd_run, "packets": cmd_packets,
+     "analyze": cmd_analyze}[args.command](args)
 
 
 if __name__ == "__main__":
