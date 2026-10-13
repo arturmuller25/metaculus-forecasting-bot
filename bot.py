@@ -41,6 +41,7 @@ from forecasting_tools import (
 )
 
 import evidence_packet
+import market_query
 from calibration import apply_platt
 from market_baseline import baseline_for_question as market_baseline_of
 from market_baseline import block_for_question as market_block
@@ -100,6 +101,8 @@ def _serialize(prediction: Any) -> Any:
         return {o.option_name: round(o.probability, 4) for o in prediction.predicted_options}
     if isinstance(prediction, NumericDistribution):
         return [[round(p.percentile, 4), p.value] for p in prediction.declared_percentiles]
+    if isinstance(prediction, list):
+        return prediction
     return str(prediction)
 
 
@@ -197,6 +200,7 @@ class ForecasterBot(ForecastBot):
         ensemble: list[GeneralLlm] | None = None,
         shadows: list[tuple[str, GeneralLlm]] | None = None,
         packet_llm: GeneralLlm | None = None,
+        market_llm: GeneralLlm | None = None,
         **kwargs,
     ) -> None:
         super().__init__(*args, **kwargs)
@@ -204,6 +208,8 @@ class ForecasterBot(ForecastBot):
         # Evidence packet (evidence_packet.py): one call that sorts, dates and
         # grades the research before the forecasters read it. None = off.
         self._packet_llm = packet_llm
+        # Reads single-series market questions for market_query.py. None = off.
+        self._market_llm = market_llm
         # How binary members are combined: "mean" (default) or "logodds".
         self._binary_pool = os.getenv("BINARY_POOL", "mean").strip().lower() or "mean"
 
@@ -462,7 +468,24 @@ class ForecasterBot(ForecastBot):
             async def market() -> str:
                 if os.getenv("MARKET_BASELINE", "1").strip() == "0":
                     return ""
-                return await asyncio.to_thread(market_block, question)
+                block = await asyncio.to_thread(market_block, question)
+                if block or self._market_llm is None:
+                    return block
+                # One series and a date or threshold ("will X close above K
+                # on D"): a cheap call names the series, code does the rest
+                # (market_query.py). Only recorded as a shadow: on 96 past
+                # MiniBench questions (market_query_backtest.py) Claude tied
+                # the baseline, seeing it in the research did not help
+                # (-1.5 points per question, 90% interval -4.8 to +1.8), and
+                # an 80% mixture's gain (+0.9, -1.0 to +2.7) missed the bar
+                # set before the test. MARKET_QUERY_BLOCK=1 shows it anyway.
+                result = await market_query.for_question(question, self._market_llm)
+                if result is None:
+                    return ""
+                shadow = result.probability if result.probability is not None else [
+                    [p / 100, v] for p, v in result.percentiles.items()]
+                _record(question, "market-baseline", "shadow", shadow)
+                return result.render() if os.getenv("MARKET_QUERY_BLOCK", "").strip() == "1" else ""
 
             blocks = await asyncio.gather(
                 primary(),

@@ -217,10 +217,18 @@ def build_bot(publish: bool, samples: int) -> ForecasterBot:
     if os.getenv("EVIDENCE_PACKET", "1").strip() != "0":
         packet_llm = _thinker(os.getenv("PACKET_MODEL", "").strip() or PACKET_MODEL, 0.1, 120, effort="low")
 
+    # Single-series market questions (market_query.py): a low-effort call
+    # names the series, then code computes the baseline. MARKET_QUERY=0 turns
+    # it off.
+    market_llm = None
+    if os.getenv("MARKET_QUERY", "1").strip() != "0":
+        market_llm = _thinker(os.getenv("MARKET_QUERY_MODEL", "").strip() or PACKET_MODEL, 0.0, 120, effort="low")
+
     return ForecasterBot(
         ensemble=ensemble,
         shadows=shadows,
         packet_llm=packet_llm,
+        market_llm=market_llm,
         # One research report per question, `samples` forecasts on it.
         research_reports_per_question=1,
         predictions_per_research_report=samples,
@@ -367,8 +375,9 @@ CLAUDE_ONLY = {
     "SHADOW_MODELS": "",
     "DIRECT_ANTHROPIC": "1",
     "ANTHROPIC_FALLBACK": "0",
-    # The packet was tested with GPT-5.6 Sol as its writer only.
+    # The packet and the market-question reader were tested with GPT-5.6 Sol only.
     "EVIDENCE_PACKET": "0",
+    "MARKET_QUERY": "0",
 }
 
 

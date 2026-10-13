@@ -67,6 +67,8 @@ _CALL: contextvars.ContextVar[dict | None] = contextvars.ContextVar("call", defa
 _TODAY: contextvars.ContextVar[datetime | None] = contextvars.ContextVar("today", default=None)
 _SLOTS = asyncio.Semaphore(IN_FLIGHT)
 _SPENT = [0.0]
+# Set by a caller that needs OpenRouter for a step other than the forecasts.
+ALLOW_OPENROUTER = [False]
 _real_acompletion = general_llm.acompletion
 
 
@@ -82,7 +84,7 @@ async def _guarded(*args, **kwargs):
     if _SPENT[0] >= SPEND_CAP:
         raise RuntimeError("spending cap reached")
     model = kwargs.get("model", "")
-    if "openrouter" in model:
+    if "openrouter" in model and not ALLOW_OPENROUTER[0]:
         raise RuntimeError(f"OpenRouter call blocked in this backtest: {model}")
     async with _SLOTS:
         response = await _real_acompletion(*args, **kwargs)

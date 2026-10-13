@@ -22,7 +22,11 @@ skipped):
    not, conflicts and missing facts (`evidence_packet.py`).
    Questions on a market series (two assets' return gap, the VIX's maximum,
    a yield or a credit spread over a window) also get a statistical baseline
-   computed from market data (`market_baseline.py`).
+   computed from market data (`market_baseline.py`). Questions on a single
+   series ("will X close above K on D", "what will X close at on D") get the
+   same kind of baseline, recorded as a shadow forecast only: a low-effort
+   call names the series and code does the rest (`market_query.py`). On 96
+   past MiniBench questions Claude tied it and showing it did not help.
 2. **Forecast.** Two models from different families (GPT-6.1 Sol and Claude
    Sonnet 5) forecast every question from the same briefing. Binary
    probabilities are averaged, multiple-choice probabilities are averaged per
@@ -105,6 +109,9 @@ All optional; defaults live in `main.py`. See `.env.example`.
 | `RESOLUTION_FETCH` | on | `0` turns off downloading the resolution sources |
 | `MARKET_BASELINE` | on | `0` turns off the market statistics block in the research |
 | `MARKET_BASELINE_WEIGHT` | `0.8` | share of the statistical baseline in the published CDF of market-series questions; `0` publishes the models' forecast only |
+| `MARKET_QUERY` | on (off with `--claude-only`) | `0` turns off the baseline for single-series market questions (a shadow record) |
+| `MARKET_QUERY_BLOCK` | off | `1` also shows that baseline to the forecasters |
+| `MARKET_QUERY_MODEL` | `openrouter/openai/gpt-5.6-sol` | model that names the series of a single-series question, at low effort |
 | `BINARY_POOL` | `mean` | how binary members are combined: `mean`, or `logodds` (the mean in log-odds) |
 | `EVIDENCE_PACKET` | on (off with `--claude-only`) | one call per question that sorts, dates and grades the research before the forecasters read it (`evidence_packet.py`); `0` turns it off |
 | `PACKET_MODEL` | `openrouter/openai/gpt-5.6-sol` | model that writes the evidence packet, at low effort |
@@ -189,6 +196,7 @@ These spend API credits and publish nothing.
 | `numeric_cdf.py` | alternative ways to build a numeric CDF from percentiles |
 | `resolution_fetch.py` | downloads the pages and data files named in the resolution criteria |
 | `market_baseline.py` | statistical baselines for market-series questions (filtered historical simulation on Yahoo Finance and FRED data) |
+| `market_query.py` | the same for single-series questions (a value on a date, a threshold on a date or in a window) |
 | `evidence_packet.py` | optional step that turns the research into a dated evidence packet |
 | `agent_forecaster.py` | agentic forecaster on the Anthropic API (web search, page reading, code execution), used as a shadow with `SHADOW_MODELS=agent/claude-sonnet-5@high`; it runs after the forecasts are published |
 | `agent_test.py` | dry-run test of the agentic forecaster on recent questions |
@@ -200,6 +208,8 @@ These spend API credits and publish nothing.
 | `numeric_rules_replay.py` | tests numeric prompt rules (floors, more percentiles) on the same replay |
 | `forecastbench_calibration.py` | measures calibration and the value of a market price in the prompt on resolved ForecastBench questions |
 | `market_backtest.py` | scores the market baseline, and Claude with and without it, on resolved Market Pulse questions |
+| `market_query_backtest.py` | the same for the single-series market questions of past MiniBench rounds |
+| `market_calibration.py` | walk-forward calibration of `market_query.py` on past dates of several series, without LLM calls |
 | `seats_replay.py` | scores ensembles of different sizes and aggregation rules from recorded replay answers, without new calls |
 | `coverage_check.py` | lists recently closed questions the bot did not forecast (runs at the end of each Actions run) |
 | `.github/workflows/forecast.yml` | scheduled runs |
