@@ -19,6 +19,7 @@ import logging
 import math
 import os
 import re
+import time
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
 
@@ -42,7 +43,9 @@ from forecasting_tools import (
 
 import claude_search
 import evidence_packet
+import gap_fill
 import market_query
+import supervisor as supervisor_module
 from calibration import apply_platt
 from market_baseline import baseline_for_question as market_baseline_of
 from market_baseline import block_for_question as market_block
@@ -204,6 +207,57 @@ def _parse_option_lines(text: str, options: list[str]) -> PredictedOptionList | 
     )
 
 
+_PERCENTILE_LINE = re.compile(
+    r"^\s*[-*]*\s*\**\s*Percentile\s*(\d{1,2})\s*\**\s*[:=]\s*\**\s*"
+    r"([-+−]?)\s*\$?\s*(\d[\d,]*(?:\.\d+)?|\.\d+)(.*)$",
+    re.IGNORECASE,
+)
+# A scale word after the number ("1.2 million", "3bn") needs the parser
+# model's unit conversion, so the code reader leaves that answer to it.
+_SCALE_WORD = re.compile(r"(?i)^(thousand|million|billion|trillion|k|m|mn|mm|b|bn|t|tn)\b")
+
+
+def _parse_percentile_lines(text: str) -> list[Percentile] | None:
+    """
+    Reads the final "Percentile N: X" block with code. The parser model can
+    take its numbers from a table earlier in the answer: in a replay where the
+    prompt asked for an explicit model of the distribution, it failed on 2 of
+    3 answers whose final block was correct. The block is read from the end
+    of the text; it must hold the six or the thirteen levels the prompts have
+    asked for, plain numbers that never fall as the level rises (ties occur
+    on count questions and SmoothDistribution handles them), or None is
+    returned and the parser model reads the answer.
+    """
+    lines = text.splitlines()
+    end = next((i for i in range(len(lines) - 1, -1, -1) if _PERCENTILE_LINE.match(lines[i])), None)
+    if end is None:
+        return None
+    found: dict[int, float] = {}
+    for line in reversed(lines[: end + 1]):
+        m = _PERCENTILE_LINE.match(line)
+        if not m:
+            if line.strip() in ("", '"', "```", "'"):
+                continue
+            break
+        level, sign, digits, rest = int(m.group(1)), m.group(2), m.group(3), m.group(4)
+        if level in found:
+            break
+        # "1,234.5" is a thousands separator; "34,9" is a decimal comma, left to the parser model.
+        if "," in digits and not re.fullmatch(r"\d{1,3}(,\d{3})+(\.\d+)?", digits):
+            return None
+        if _SCALE_WORD.match(rest.strip(" *%")):
+            return None
+        value = float(digits.replace(",", ""))
+        found[level] = -value if sign in ("-", "−") else value
+    levels = sorted(found)
+    if levels not in ([1, 5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 95, 99], [10, 20, 40, 60, 80, 90]):
+        return None
+    values = [found[k] for k in levels]
+    if any(b < a for a, b in zip(values, values[1:])) or values[0] == values[-1]:
+        return None
+    return [Percentile(percentile=k / 100, value=found[k]) for k in levels]
+
+
 async def _asknews_latest(searcher: Any, query: str) -> str:
     """AskNews latest-news search only (1 call), formatted like AskNewsSearcher's full search."""
     from asknews_sdk import AsyncAskNewsSDK
@@ -239,6 +293,24 @@ def _quantile(dist: NumericDistribution, q: float) -> float:
     return pts[0][1] if q < pts[0][0] else pts[-1][1]
 
 
+def _short(prediction: Any) -> str:
+    """A forecast in a few words, for the supervisor's message."""
+    if isinstance(prediction, float):
+        return f"{prediction:.1%}"
+    if isinstance(prediction, PredictedOptionList):
+        return ", ".join(f"{o.option_name} {o.probability:.0%}" for o in prediction.predicted_options)
+    if isinstance(prediction, NumericDistribution):
+        return " | ".join(f"P{q} {_fmt_num(_quantile(prediction, q / 100))}" for q in (5, 10, 25, 50, 75, 90, 95))
+    return str(prediction)
+
+
+def _in_share(question: MetaculusQuestion, share: float) -> bool:
+    """Whether a question falls in a fixed sample of about `share` of all questions, chosen by its post id."""
+    if share >= 1:
+        return True
+    return ((question.id_of_post or 0) * 2654435761) % 1000 < share * 1000
+
+
 class ForecasterBot(ForecastBot):
     # One question at a time. Rate limits, not CPU, are the bottleneck.
     _max_concurrent_questions = 1
@@ -254,9 +326,19 @@ class ForecasterBot(ForecastBot):
         shadows: list[tuple[str, GeneralLlm]] | None = None,
         packet_llm: GeneralLlm | None = None,
         market_llm: GeneralLlm | None = None,
+        gap_agent: Any = None,
+        supervisor: Any = None,
         **kwargs,
     ) -> None:
         super().__init__(*args, **kwargs)
+
+        # Deferred panel experiments, recorded as shadows after the run's
+        # forecasts are published (run_deferred_shadows): the gap-fill pass
+        # (gap_fill.py) with the members answering again on its findings,
+        # and the supervisor (supervisor.py) over every analysis. None = off.
+        self._gap_agent = gap_agent
+        self._supervisor = supervisor
+        self._panels: list[tuple] = []
 
         # Evidence packet (evidence_packet.py): one call that sorts, dates and
         # grades the research before the forecasters read it. None = off.
@@ -652,29 +734,120 @@ class ForecasterBot(ForecastBot):
         answers = [r for r in results[: len(members)] if r is not None]
         if not answers:
             raise RuntimeError("every forecasting model failed on this question")
+        if (self._gap_agent is not None or self._supervisor is not None) and _in_share(
+            question, _env_float("PANEL_SHARE", 1.0)
+        ):
+            self._panels.append((question, prompt, parse, answers, members))
         return answers
 
+    async def _shadow_answer(
+        self, question: MetaculusQuestion, name: str, llm: Any, prompt: str, parse: Callable[[str], Awaitable[Any]]
+    ) -> tuple[str, Any, str] | None:
+        """One shadow answer, parsed and recorded; None (and a failure counted) when it fails."""
+        key = f"{name} (shadow)"
+        try:
+            text = await llm.invoke(prompt)
+            prediction = await parse(text)
+        except Exception as exc:
+            logger.warning(f"{key} failed on {question.page_url}: {type(exc).__name__}: {exc}")
+            self.model_failures[key] = self.model_failures.get(key, 0) + 1
+            return None
+        if prediction is None:
+            self.model_failures[key] = self.model_failures.get(key, 0) + 1
+            return None
+        _record(question, name, "shadow", prediction)
+        return name, prediction, text
+
     async def run_deferred_shadows(self) -> None:
-        """Runs the slow shadow models queued by _ask_models, one question at a time, and records their forecasts."""
+        """
+        Runs the slow shadow work queued by _ask_models, one question at a
+        time, after the run's forecasts are published: the agentic
+        forecaster, then the panel experiments (gap-fill and supervisor),
+        which read the agent's analysis of the same question. Questions with
+        a panel go first. A cap on questions (DEFERRED_MAX_PER_RUN, default
+        4) and on time (DEFERRED_BUDGET_S, default 900 seconds, checked
+        before each question) keep this phase from delaying the next check
+        for new questions; these are samples, not coverage.
+        """
         pending, self._deferred_shadows = self._deferred_shadows, []
-        # A cap per run keeps a burst of new questions from holding up the
-        # next scheduled iteration; the shadow is a sample, not coverage.
+        panels, self._panels = self._panels, []
+        if not pending and not panels:
+            return
+        agents: dict[int, list[tuple]] = {}
+        for item in pending:
+            agents.setdefault(item[0].id_of_post, []).append(item)
+        panel_of = {panel[0].id_of_post: panel for panel in panels}
+        order = list(panel_of) + [q for q in agents if q not in panel_of]
         cap = int((os.getenv("DEFERRED_MAX_PER_RUN") or "").strip() or 4)
-        if len(pending) > cap:
-            logger.info(f"Deferred shadows: running {cap} of {len(pending)} this run")
-            pending = pending[:cap]
-        for question, name, llm, prompt, parse in pending:
-            key = f"{name} (shadow)"
+        budget = _env_float("DEFERRED_BUDGET_S", 900)
+        start = time.monotonic()
+        for done, post_id in enumerate(order):
+            if done >= cap or time.monotonic() - start > budget:
+                logger.info(f"Deferred shadows: stopped after {done} of {len(order)} questions (cap {cap}, {budget:.0f} s)")
+                break
+            analyses = []
+            for question, name, llm, prompt, parse in agents.get(post_id, []):
+                answer = await self._shadow_answer(question, name, llm, prompt, parse)
+                if answer is not None:
+                    analyses.append(answer)
+            if post_id in panel_of:
+                await self._run_panel(panel_of[post_id], analyses)
+
+    async def _run_panel(self, panel: tuple, agent_answers: list[tuple[str, Any, str]]) -> None:
+        """
+        The gap-fill pass and the members again on its findings (recorded as
+        "gapfill+<member>"), then the supervisor over every analysis
+        (recorded as "supervisor/<model>").
+        """
+        question, prompt, parse, answers, members = panel
+        task, gap_answers = prompt, []
+        if self._gap_agent is not None:
             try:
-                prediction = await parse(await llm.invoke(prompt))
-            except Exception as exc:
-                logger.warning(f"{key} failed on {question.page_url}: {type(exc).__name__}: {exc}")
-                self.model_failures[key] = self.model_failures.get(key, 0) + 1
-                continue
-            if prediction is None:
-                self.model_failures[key] = self.model_failures.get(key, 0) + 1
-                continue
-            _record(question, name, "shadow", prediction)
+                section = await gap_fill.findings(self._gap_agent, prompt)
+            except Exception as exc:  # noqa: BLE001 - the panel goes on without it
+                logger.warning(f"Gap-fill failed on {question.page_url}: {type(exc).__name__}: {exc}")
+                self.model_failures[f"{self._gap_agent.model} (shadow)"] = (
+                    self.model_failures.get(f"{self._gap_agent.model} (shadow)", 0) + 1
+                )
+                section = ""
+            if section:
+                logger.info(f"Gap-fill findings for {question.page_url}:\n{section}")
+                task = gap_fill.with_findings(prompt, section)
+                reruns = await asyncio.gather(
+                    *(self._shadow_answer(question, f"gapfill+{name}", llm, task, parse) for name, llm in members)
+                )
+                gap_answers = [r for r in reruns if r is not None]
+        if self._supervisor is None:
+            return
+        analyses = (
+            [("read the shared briefing", _short(p), t) for _, p, t in answers]
+            + [("read the shared briefing plus a second, verified research pass", _short(p), t) for _, p, t in gap_answers]
+            + [("researched on its own with web tools", _short(p), t) for _, p, t in agent_answers]
+        )
+        if len(analyses) < 2:
+            return
+        pooled = await self._pooled(question, [p for _, p, _ in answers])
+        await self._shadow_answer(
+            question, self._supervisor.model, self._supervisor,
+            supervisor_module.message(task, analyses, pooled), parse,
+        )
+
+    async def _pooled(self, question: MetaculusQuestion, predictions: list[Any]) -> str:
+        """The members' pooled forecast in words, as the bot publishes it before any market blend."""
+        if len(predictions) == 1:
+            return _short(predictions[0])
+        if isinstance(predictions[0], float):
+            pool = _logodds_mean(predictions) if self._binary_pool == "logodds" else _trimmed_mean(predictions)
+            return _short(pool)
+        if isinstance(predictions[0], NumericDistribution):
+            # The members' percentiles as written, without the 15% widening
+            # the bot applies when it builds each CDF: the supervisor's own
+            # percentiles get that widening when they are parsed.
+            predictions = [
+                SmoothDistribution.build(p.declared_percentiles, question, method=self._cdf_method, widen=1.0)
+                for p in predictions
+            ]
+        return _short(await super()._aggregate_predictions(predictions, question))
 
     # ------------------------------------------------------------------
     # BINARY
@@ -989,24 +1162,34 @@ class ForecasterBot(ForecastBot):
             - Turn any values that are in scientific notation into regular numbers.
             """
         )
+        low, high = question.lower_bound, question.upper_bound
+
+        def in_range(value: float) -> bool:
+            return low is None or high is None or low - (high - low) <= value <= high + (high - low)
+
         async def parse(text: str) -> NumericDistribution:
-            percentiles: list[Percentile] = await structure_output(
-                text,
-                list[Percentile],
-                model=self.get_llm("parser", "llm"),
-                additional_instructions=parsing_instructions,
-                num_validation_samples=self._structure_output_validation_samples,
-            )
+            # The final block read by code first (_parse_percentile_lines): on
+            # 662 recorded replay answers it matched the parser model on 649,
+            # kept a 1st percentile the model dropped on one, and read 12
+            # whose parse had failed. A block outside the question's range is
+            # left to the parser model, which converts units ("$500,000,000"
+            # for a question in billions).
+            percentiles = _parse_percentile_lines(text)
+            if percentiles is None or not in_range(percentiles[len(percentiles) // 2].value):
+                percentiles = await structure_output(
+                    text,
+                    list[Percentile],
+                    model=self.get_llm("parser", "llm"),
+                    additional_instructions=parsing_instructions,
+                    num_validation_samples=self._structure_output_validation_samples,
+                )
             distribution = SmoothDistribution.build(
                 percentiles, question, method=self._cdf_method, widen=self._cdf_widen
             )
             # Guard: a median far outside the question's range usually means a
             # unit or power-of-ten slip in the answer or the parse.
-            low, high = question.lower_bound, question.upper_bound
             median = _quantile(distribution, 0.5)
-            if low is not None and high is not None and not (
-                low - (high - low) <= median <= high + (high - low)
-            ):
+            if not in_range(median):
                 logger.warning(
                     f"Numeric median {_fmt_num(median)} is far outside the range "
                     f"[{_fmt_num(low)}, {_fmt_num(high)}] on {question.page_url}; check units"

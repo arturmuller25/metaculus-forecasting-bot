@@ -31,7 +31,9 @@ skipped):
    Sonnet 5.5) forecast every question from the same briefing. Binary
    probabilities are averaged in log-odds, multiple-choice probabilities are averaged per
    option, and numeric and discrete distributions are combined by the
-   pointwise median of their CDFs. On market-series questions the published
+   pointwise median of their CDFs (each model's percentiles are read by code
+   from its final answer block, with a parser model as the fallback). On
+   market-series questions the published
    CDF is 80% the statistical baseline and 20% the models: on 96 resolved
    Market Pulse questions the baseline alone beat Claude's own forecasts
    (`market_backtest.py`).
@@ -41,6 +43,27 @@ skipped):
 
 Every model's forecast is also appended to `logs/forecasts.jsonl`, so each
 model can be scored separately once questions resolve.
+
+**Experiments recorded as shadows.** After a run's forecasts are published,
+slower candidates answer the same questions and are only recorded, to be
+scored against the published forecast once questions resolve. All use the
+Anthropic API (`ANTHROPIC_API_KEY`), never the OpenRouter key.
+
+- The agentic forecaster (`agent_forecaster.py`): Claude with web search,
+  page reading and code execution researches on its own before answering.
+- Gap-fill (`gap_fill.py`, `GAP_FILL=1`): a second research pass that checks
+  the two or three claims of the briefing a forecast would lean on hardest
+  against primary sources, reads the resolution source, and fills what is
+  missing; it reports dated, sourced facts only. The members then answer
+  again on the briefing plus those findings (recorded as `gapfill+<member>`).
+- Supervisor (`supervisor.py`, `SUPERVISOR=1`): reads every analysis of the
+  question (the members, the agent, the gap-fill answers), sorts their
+  disagreements into factual and judgment, checks the factual ones with the
+  web tools, and gives a final forecast without averaging by habit
+  (recorded as `supervisor/<model>`).
+
+Together they give five to six independent analyses per question, so pools of
+any subset can also be scored from the records without new calls.
 
 OpenAI and Anthropic models are called through OpenRouter. Without an
 OpenRouter key the bot falls back to the Metaculus LLM proxy, authenticated
@@ -120,7 +143,11 @@ All optional; defaults live in `main.py`. See `.env.example`.
 | `ANTHROPIC_FALLBACK` | on | `0` makes a failed direct Claude call fail instead of retrying through OpenRouter (set by `--claude-only`) |
 | `REFRESH_DAYS` | `14` | age at which a forecast is refreshed in `market_pulse` and `animal_futures` |
 | `REFRESH_MAX_PER_RUN` | `8` | most questions forecast per run in those modes, soonest close first |
-| `DEFERRED_MAX_PER_RUN` | `4` | most deferred shadow calls (the agent) per run |
+| `DEFERRED_MAX_PER_RUN` | `4` | most questions given deferred shadow work (the agent, gap-fill, supervisor) per run |
+| `DEFERRED_BUDGET_S` | `900` | seconds after which no further question gets deferred shadow work in a run |
+| `GAP_FILL` | off | `1` runs the gap-fill experiment (`gap_fill.py`); `GAP_FILL_MODEL`, `GAP_FILL_EFFORT`, `GAP_FILL_TOOLS`, `GAP_FILL_TIME` tune it (defaults `claude-sonnet-5-5`, `medium`, 8 searches plus fetches, 240 s) |
+| `SUPERVISOR` | off | `1` runs the supervisor experiment (`supervisor.py`); `SUPERVISOR_MODEL`, `SUPERVISOR_EFFORT`, `SUPERVISOR_TOOLS`, `SUPERVISOR_TIME` tune it (defaults `claude-sonnet-5-5`, `high`, 6, 300 s) |
+| `PANEL_SHARE` | `1` | share of questions, chosen by post id, that get the gap-fill and supervisor experiments |
 | `EXTRA_MODES` | none | GitHub Actions repository variable: modes run with `--claude-only` after each scheduled iteration, e.g. `market_pulse,animal_futures` |
 | `MAX_COST_PER_RUN` | `5.00` | cost cap per run in USD (web search cost is not tracked) |
 | `CALIBRATION_A`, `CALIBRATION_B` | `1.0`, `0.0` | Platt scaling coefficients |
@@ -201,6 +228,8 @@ These spend API credits and publish nothing.
 | `claude_search.py` | Claude's web research through the Anthropic API, with the sources it found; the OpenRouter route is the fallback |
 | `agent_forecaster.py` | agentic forecaster on the Anthropic API (web search, page reading, code execution), used as a shadow with `SHADOW_MODELS=agent/claude-sonnet-5-5@high`; it runs after the forecasts are published |
 | `agent_test.py` | dry-run test of the agentic forecaster on recent questions |
+| `gap_fill.py` | second research pass that verifies the briefing against primary sources (a shadow experiment) |
+| `supervisor.py` | supervisor that reconciles the independent analyses of a question (a shadow experiment) |
 | `analyze_results.py` | scores resolved forecasts, overall and per model |
 | `numeric_replay.py` | compares the numeric CDF constructions on the bot's own questions |
 | `forecast_replay.py` | replays the forecast step with frozen research on resolved questions, to compare models and prompt variants |

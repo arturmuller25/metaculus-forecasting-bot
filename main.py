@@ -228,11 +228,31 @@ def build_bot(publish: bool, samples: int) -> ForecasterBot:
     if os.getenv("MARKET_QUERY", "1").strip() != "0":
         market_llm = _thinker(os.getenv("MARKET_QUERY_MODEL", "").strip() or PACKET_MODEL, 0.0, 120, effort="low")
 
+    # Deferred panel experiments on the Anthropic API, recorded as shadows
+    # after the run's forecasts are published: GAP_FILL=1 checks the research
+    # against primary sources (gap_fill.py) and has the members answer again
+    # on its findings; SUPERVISOR=1 reconciles every analysis (supervisor.py).
+    # PANEL_SHARE (0 to 1, default 1) samples the questions they run on.
+    gap_agent = supervisor_agent = None
+    if os.getenv("ANTHROPIC_API_KEY", "").strip():
+        if os.getenv("GAP_FILL", "").strip() == "1":
+            import gap_fill
+
+            gap_agent = gap_fill.make_agent()
+        if os.getenv("SUPERVISOR", "").strip() == "1":
+            import supervisor
+
+            supervisor_agent = supervisor.make_agent()
+    elif os.getenv("GAP_FILL", "").strip() == "1" or os.getenv("SUPERVISOR", "").strip() == "1":
+        logger.warning("GAP_FILL and SUPERVISOR need ANTHROPIC_API_KEY; both stay off")
+
     return ForecasterBot(
         ensemble=ensemble,
         shadows=shadows,
         packet_llm=packet_llm,
         market_llm=market_llm,
+        gap_agent=gap_agent,
+        supervisor=supervisor_agent,
         # One research report per question, `samples` forecasts on it.
         research_reports_per_question=1,
         predictions_per_research_report=samples,
@@ -382,6 +402,8 @@ CLAUDE_ONLY = {
     # The packet and the market-question reader were tested with GPT-5.6 Sol only.
     "EVIDENCE_PACKET": "0",
     "MARKET_QUERY": "0",
+    "GAP_FILL": "0",
+    "SUPERVISOR": "0",
 }
 
 

@@ -178,7 +178,9 @@ def _kind(prompt: str) -> str | None:
         return "binary"
     if "Percentile 10:" in prompt:
         return "numeric"
-    if "Option_A: Probability_A" in prompt:
+    # The multiple-choice prompt lists "<option>: NN%" lines since 2026-10-20;
+    # older prompts had "Option_A: Probability_A".
+    if "Option_A: Probability_A" in prompt or ("The options are:" in prompt and ": NN%" in prompt):
         return "multiple_choice"
     return None
 
@@ -276,7 +278,17 @@ class AgentForecaster:
         effort: str = "high",
         max_tool_uses: int = 12,
         time_limit_s: int = 300,
+        system: str | None = None,
+        role: str = "agent",
+        answer_block: bool = True,
     ) -> None:
+        """
+        system replaces the forecaster's instructions (a template with the
+        same {today}, {searches}, {fetches} and {minutes} fields); role names
+        the instance in records ("agent/<model>", "supervisor/<model>").
+        answer_block=False returns the final text as written, for tasks that
+        report findings instead of a forecast (gap_fill.py).
+        """
         model = model.removeprefix("anthropic/")
         if effort not in EFFORTS:
             raise ValueError(f"effort must be one of {EFFORTS}, not {effort!r}")
@@ -288,7 +300,9 @@ class AgentForecaster:
         self.time_limit_s = int(time_limit_s)
         self.search_cap = self.max_tool_uses // 2
         self.fetch_cap = self.max_tool_uses - self.search_cap
-        self.model = f"agent/{model}"
+        self.system = system or _SYSTEM
+        self.answer_block = answer_block
+        self.model = f"{role}/{model}"
         # Stats of every call made through this instance, newest last.
         self.calls: list[dict] = []
         if model not in PRICES:
@@ -478,7 +492,7 @@ class AgentForecaster:
         kwargs: dict[str, Any] = dict(
             model=self.api_model,
             max_tokens=MAX_TOKENS,
-            system=_SYSTEM.format(
+            system=self.system.format(
                 today=datetime.now(timezone.utc).strftime("%Y-%m-%d"),
                 searches=self.search_cap,
                 fetches=self.fetch_cap,
@@ -543,6 +557,11 @@ class AgentForecaster:
                     continue
                 break
 
+            if not self.answer_block:
+                text = _final_text(messages[-1]["content"]) or None
+                if text is None:
+                    raise RuntimeError(f"empty reply (stops: {s['stop_reasons']})")
+                return text
             text = finish_answer(_final_text(messages[-1]["content"]), prompt)
             if text is None:
                 # One short turn, tools off, to restate the answer block.

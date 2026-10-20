@@ -93,6 +93,13 @@ jobs:
           EXA_API_KEY: ${{ secrets.EXA_API_KEY }}
           PERPLEXITY_API_KEY: ${{ secrets.PERPLEXITY_API_KEY }}
           SHADOW_MODELS: ${{ vars.SHADOW_MODELS }}
+          # Deferred panel experiments, recorded only (gap_fill.py,
+          # supervisor.py): "1" turns each on; PANEL_SHARE samples questions.
+          GAP_FILL: ${{ vars.GAP_FILL }}
+          SUPERVISOR: ${{ vars.SUPERVISOR }}
+          PANEL_SHARE: ${{ vars.PANEL_SHARE }}
+          DEFERRED_MAX_PER_RUN: ${{ vars.DEFERRED_MAX_PER_RUN }}
+          DEFERRED_BUDGET_S: ${{ vars.DEFERRED_BUDGET_S }}
           # Tournaments outside FutureEval, run Claude-only (Anthropic key),
           # comma-separated modes, e.g. "market_pulse,animal_futures".
           EXTRA_MODES: ${{ vars.EXTRA_MODES }}
@@ -132,6 +139,7 @@ jobs:
           ITER=0
           while :; do
             ITER=$((ITER + 1))
+            ITER_START=$(date +%s)
             echo "::group::iteration $ITER  ($(date -u +%H:%M:%S) UTC)"
             # A failed iteration (network, rate limit, one bad question) must
             # not stop the loop; the next cycle tries again.
@@ -143,11 +151,16 @@ jobs:
             fi
             echo "::endgroup::"
             NOW=$(date +%s)
-            if [ $((NOW - START + PAUSE)) -ge $CAP ]; then
+            # Iterations start every 20 minutes: a long one (new questions,
+            # then the deferred shadows) shortens the pause instead of
+            # pushing the next check for new questions later.
+            WAIT=$((PAUSE - (NOW - ITER_START)))
+            if [ $WAIT -lt 60 ]; then WAIT=60; fi
+            if [ $((NOW - START + WAIT)) -ge $CAP ]; then
               echo "time cap reached after $ITER iterations; stopping so the next run takes over"
               break
             fi
-            sleep $PAUSE
+            sleep $WAIT
           done
 
       - name: Check for missed questions

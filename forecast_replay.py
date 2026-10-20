@@ -158,7 +158,23 @@ V3 = [(
     "When the research gives a base rate for this exact kind of event, start from it and move"
     " away only with case-specific evidence.",
 )]
-VARIANTS = {"base": [], "V1": V1, "V2": V2, "V3": V3, "V4": V1 + V2 + V3, "P": []}
+# Numeric questions: an explicit model of the quantity before judgment, as the
+# Metaculus agents that topped MiniBench round 2 wrote ("98% Normal(mean 6.85,
+# sd 0.38) + 2% Uniform", the spread from daily volatility and the number of
+# sessions).
+_HIGH_SCENARIO = _words("(f) A brief description of an unexpected scenario that results in a high outcome.")
+N = [(
+    _HIGH_SCENARIO,
+    "(f) A brief description of an unexpected scenario that results in a high outcome.\n"
+    "(g) An explicit model of the quantity before any judgment: its latest value and the date of that value;"
+    " how much this kind of value typically moves over a period this long, from its own recent history"
+    " (daily or weekly changes scaled by the square root of the number of periods, or an event rate for"
+    " counts); any scheduled event inside the window that changes that; and the distribution this implies,"
+    " written out (for example normal with mean M and spread S, lognormal, or Poisson with rate R), with its"
+    " 10th, 50th and 90th percentiles. Then adjust that distribution for what the research says, and give the"
+    " reason for each adjustment.",
+)]
+VARIANTS = {"base": [], "V1": V1, "V2": V2, "V3": V3, "V4": V1 + V2 + V3, "P": [], "N": N}
 # Variants that change the research instead of the prompt: "P" appends the
 # evidence packet built by `packets` (evidence_packet.py) to the research.
 PACKET_VARIANTS = {"P"}
