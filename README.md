@@ -198,6 +198,7 @@ These spend API credits and publish nothing.
 | `market_baseline.py` | statistical baselines for market-series questions (filtered historical simulation on Yahoo Finance and FRED data) |
 | `market_query.py` | the same for single-series questions (a value on a date, a threshold on a date or in a window) |
 | `evidence_packet.py` | optional step that turns the research into a dated evidence packet |
+| `claude_search.py` | Claude's web research through the Anthropic API, with the sources it found; the OpenRouter route is the fallback |
 | `agent_forecaster.py` | agentic forecaster on the Anthropic API (web search, page reading, code execution), used as a shadow with `SHADOW_MODELS=agent/claude-sonnet-5-5@high`; it runs after the forecasts are published |
 | `agent_test.py` | dry-run test of the agentic forecaster on recent questions |
 | `analyze_results.py` | scores resolved forecasts, overall and per model |

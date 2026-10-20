@@ -40,6 +40,7 @@ from forecasting_tools import (
     structure_output,
 )
 
+import claude_search
 import evidence_packet
 import market_query
 from calibration import apply_platt
@@ -319,6 +320,17 @@ class ForecasterBot(ForecastBot):
             # about 4x less search content; one call went past 200k input
             # tokens and was billed at the long-context rate. "low" yielded
             # ~60% of the text for a fifth of the price.
+            # Through the Anthropic API first (claude_search.py, the bot
+            # maker's own credit): the OpenRouter route cost about $0.25 of
+            # the tournament key per question. DIRECT_ANTHROPIC=0 skips it.
+            direct = bool(os.getenv("ANTHROPIC_API_KEY", "").strip()) and os.getenv("DIRECT_ANTHROPIC", "").strip() != "0"
+            if direct:
+                try:
+                    return await claude_search.research(prompt)
+                except Exception as exc:  # noqa: BLE001 - fall back to OpenRouter below
+                    if os.getenv("ANTHROPIC_FALLBACK", "").strip() == "0":
+                        raise
+                    logger.warning(f"Direct Claude search failed ({type(exc).__name__}: {exc}); using OpenRouter")
             return await GeneralLlm(
                 model="openrouter/anthropic/claude-sonnet-5:online",
                 temperature=0.1, timeout=180, reasoning_effort="low",
