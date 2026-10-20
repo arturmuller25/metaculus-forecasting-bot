@@ -82,7 +82,9 @@ def _logodds_mean(values: list[float]) -> float:
     1%..99% first. When members agree on the side it lands a little further
     from 50% than the plain mean. Replays of MiniBench round 1 (seats_replay.py)
     scored it 0.3 to 0.6 points per binary question above the plain mean,
-    better on 24 or 25 of 29 questions.
+    better on 24 or 25 of 29 questions; round 2, with GPT-6.1 Sol and Sonnet
+    5.5, +0.4 (90% CI +0.07 to +0.79), better on 28 of 35. Default since
+    2026-10-19.
     """
     clipped = [min(0.99, max(0.01, v)) for v in values]
     z = sum(math.log(v / (1 - v)) for v in clipped) / len(clipped)
@@ -210,8 +212,8 @@ class ForecasterBot(ForecastBot):
         self._packet_llm = packet_llm
         # Reads single-series market questions for market_query.py. None = off.
         self._market_llm = market_llm
-        # How binary members are combined: "mean" (default) or "logodds".
-        self._binary_pool = os.getenv("BINARY_POOL", "mean").strip().lower() or "mean"
+        # How binary members are combined: "logodds" (default) or "mean".
+        self._binary_pool = os.getenv("BINARY_POOL", "logodds").strip().lower() or "logodds"
 
         # Shadow models answer every question alongside the ensemble but are
         # only recorded to FORECAST_LOG, never aggregated or published. They

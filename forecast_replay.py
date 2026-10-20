@@ -68,9 +68,10 @@ from numeric_replay import bucket_of, members_from_comment as numeric_members_fr
 
 logger = logging.getLogger("forecast_replay")
 
-PROJECT = 33125  # MiniBench round 1
+# MiniBench round 1 by default; REPLAY_PROJECT and REPLAY_OUT select another round.
+PROJECT = int(os.getenv("REPLAY_PROJECT", "33125"))
 BOT_USER = 308418  # muller-ganhador-bot
-OUT = os.path.join("logs", "replay_r1")
+OUT = os.getenv("REPLAY_OUT", "").strip() or os.path.join("logs", "replay_r1")
 ANSWERS = os.path.join(OUT, "answers.jsonl")
 BUDGET = os.path.join(OUT, "budget.json")
 
@@ -79,7 +80,7 @@ BUDGET = os.path.join(OUT, "budget.json")
 bot_module.FORECAST_LOG = os.path.join(OUT, "forecasts.jsonl")
 
 SPEND_CAP = 60.0  # dollars of key drop since the baseline
-KEY_FLOOR = 480.0  # dollars left on the key
+KEY_FLOOR = float(os.getenv("REPLAY_KEY_FLOOR", "420"))  # dollars left on the key
 IN_FLIGHT = 4  # LLM calls at once, parser included
 # Production uses 120 s. A longer timeout here keeps a slow but valid answer
 # (and its cost) instead of paying for a retry; the time of each call is
@@ -93,10 +94,19 @@ MODELS = {
     "sonnet55": "openrouter/anthropic/claude-sonnet-5.5",
     "sol61": "openrouter/openai/gpt-6.1-sol",
     "sol6": "openrouter/openai/gpt-6-sol",
+    # Claude through the Anthropic API (the bot maker's own credit), not OpenRouter.
+    "sonnet5d": "anthropic/claude-sonnet-5",
+    "opus55d": "anthropic/claude-opus-5-5",
+    "sonnet55d": "anthropic/claude-sonnet-5-5",
+    "fable51d": "anthropic/claude-fable-5-1",
 }
 
 # Two-model ensembles scored offline from the single-model answers.
 PAIRS = [
+    ("sol61", "sonnet5d"),
+    ("sol61", "opus55d"),
+    ("sol61", "sonnet55d"),
+    ("sol61", "fable51d"),
     ("sol56", "sonnet5"),  # production today
     ("sol56", "opus55"),
     ("sol56", "sonnet55"),

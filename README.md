@@ -28,8 +28,8 @@ skipped):
    call names the series and code does the rest (`market_query.py`). On 96
    past MiniBench questions Claude tied it and showing it did not help.
 2. **Forecast.** Two models from different families (GPT-6.1 Sol and Claude
-   Sonnet 5) forecast every question from the same briefing. Binary
-   probabilities are averaged, multiple-choice probabilities are averaged per
+   Sonnet 5.5) forecast every question from the same briefing. Binary
+   probabilities are averaged in log-odds, multiple-choice probabilities are averaged per
    option, and numeric and discrete distributions are combined by the
    pointwise median of their CDFs. On market-series questions the published
    CDF is 80% the statistical baseline and 20% the models: on 96 resolved
@@ -87,7 +87,7 @@ Without `--publish` the bot runs the full pipeline but submits nothing.
 | `--publish` | submit forecasts and comments to Metaculus |
 | `--limit N` | forecast at most N questions, alternating question types |
 | `--samples N` | run the forecast step N times per question (default 1) |
-| `--claude-only` | use only the Anthropic API and free sources (the resolution source download, market data), never the OpenRouter key or the sponsored AskNews plan: Claude Sonnet 5 researches with its web search tool, Sonnet 5 and Opus 5.5 forecast |
+| `--claude-only` | use only the Anthropic API and free sources (the resolution source download, market data), never the OpenRouter key or the sponsored AskNews plan: Claude Sonnet 5 researches with its web search tool, Sonnet 5.5 and Opus 5.5 forecast |
 
 In `market_pulse` and `animal_futures`, tournaments where bots compete with people and may update, the bot forecasts new questions and refreshes a forecast older than `REFRESH_DAYS` (default 14), or older than 12 hours within 2 days of the question's close.
 
@@ -102,7 +102,7 @@ All optional; defaults live in `main.py`. See `.env.example`.
 | `PARSER_MODEL` | `openrouter/openai/gpt-4o-mini` | extracts structured values from model output |
 | `REASONING_EFFORT` | `high` | reasoning effort for forecasting models |
 | `RESEARCH_REASONING` | `low` | reasoning effort for research calls |
-| `ENSEMBLE_MODELS` | GPT-6.1 Sol, Claude Sonnet 5 | comma-separated ensemble |
+| `ENSEMBLE_MODELS` | GPT-6.1 Sol, Claude Sonnet 5.5 | comma-separated ensemble |
 | `ENSEMBLE` | on | `0` disables the ensemble |
 | `SHADOW_MODELS` | none | models that forecast every question but are only recorded, never published, as `model[@effort]`, e.g. `openrouter/openai/gpt-5.4` |
 | `RESEARCH_PROVIDERS` | auto | force a provider list, e.g. `asknews,anthropic-search` |
@@ -112,7 +112,7 @@ All optional; defaults live in `main.py`. See `.env.example`.
 | `MARKET_QUERY` | on (off with `--claude-only`) | `0` turns off the baseline for single-series market questions (a shadow record) |
 | `MARKET_QUERY_BLOCK` | off | `1` also shows that baseline to the forecasters |
 | `MARKET_QUERY_MODEL` | `openrouter/openai/gpt-5.6-sol` | model that names the series of a single-series question, at low effort |
-| `BINARY_POOL` | `mean` | how binary members are combined: `mean`, or `logodds` (the mean in log-odds) |
+| `BINARY_POOL` | `logodds` | how binary members are combined: `logodds` (the mean in log-odds) or `mean` |
 | `EVIDENCE_PACKET` | on (off with `--claude-only`) | one call per question that sorts, dates and grades the research before the forecasters read it (`evidence_packet.py`); `0` turns it off |
 | `PACKET_MODEL` | `openrouter/openai/gpt-5.6-sol` | model that writes the evidence packet, at low effort |
 | `ANTHROPIC_API_KEY` | none | when set, Claude ensemble members are called through the Anthropic API first, with OpenRouter as the fallback |
@@ -198,7 +198,7 @@ These spend API credits and publish nothing.
 | `market_baseline.py` | statistical baselines for market-series questions (filtered historical simulation on Yahoo Finance and FRED data) |
 | `market_query.py` | the same for single-series questions (a value on a date, a threshold on a date or in a window) |
 | `evidence_packet.py` | optional step that turns the research into a dated evidence packet |
-| `agent_forecaster.py` | agentic forecaster on the Anthropic API (web search, page reading, code execution), used as a shadow with `SHADOW_MODELS=agent/claude-sonnet-5@high`; it runs after the forecasts are published |
+| `agent_forecaster.py` | agentic forecaster on the Anthropic API (web search, page reading, code execution), used as a shadow with `SHADOW_MODELS=agent/claude-sonnet-5-5@high`; it runs after the forecasts are published |
 | `agent_test.py` | dry-run test of the agentic forecaster on recent questions |
 | `analyze_results.py` | scores resolved forecasts, overall and per model |
 | `numeric_replay.py` | compares the numeric CDF constructions on the bot's own questions |

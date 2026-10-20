@@ -60,9 +60,13 @@ if _HAS_OPENROUTER:
     # 1 (forecast_replay.py, two runs) it tied on binaries and did better on
     # numerics (+2.8 points per question, 90% CI +0.05 to +5.7) at the same
     # price. GPT-5.6 Sol still does the research, and runs as a shadow
-    # forecaster (SHADOW_MODELS) to catch a regression. Claude Opus 5.5 cost
-    # 60% more without a clear gain, and Claude Sonnet 5.5 returned no
-    # reasoning tokens through OpenRouter, so Sonnet 5 stays.
+    # forecaster (SHADOW_MODELS) to catch a regression. Claude Sonnet 5.5
+    # replaced Sonnet 5 on 2026-10-19: in a replay of MiniBench round 2 with
+    # Claude on the Anthropic API (where it reasons; through OpenRouter it
+    # returned no reasoning tokens in round 1), the pair with Sonnet 5.5 beat
+    # the pair with Sonnet 5 by 3.1 points per question (90% CI +0.6 to +5.7,
+    # 57 questions, two runs), at the same price; Sonnet 5 was the weakest
+    # model alone, and the weaker member live in round 2.
     _FORECAST = "openrouter/openai/gpt-6.1-sol"
     _RESEARCH = "openrouter/openai/gpt-5.6-sol:online"
     _PARSER = "openrouter/openai/gpt-4o-mini"
@@ -76,7 +80,7 @@ if _HAS_OPENROUTER:
     # $4.38 (measured 2026-09-22) and the members repeated the same engines.
     _ENSEMBLE = [
         "openrouter/openai/gpt-6.1-sol",
-        "openrouter/anthropic/claude-sonnet-5",
+        "openrouter/anthropic/claude-sonnet-5.5",
     ]
 else:
     _FORECAST = "metaculus/claude-sonnet-4-5"
@@ -370,7 +374,7 @@ CLAUDE_ONLY = {
     "FORECAST_MODEL": "anthropic/claude-sonnet-5",
     "RESEARCH_MODEL": "anthropic/claude-sonnet-5",
     "PARSER_MODEL": "anthropic/claude-haiku-4-5",
-    "ENSEMBLE_MODELS": "openrouter/anthropic/claude-sonnet-5,openrouter/anthropic/claude-opus-5.5",
+    "ENSEMBLE_MODELS": "openrouter/anthropic/claude-sonnet-5.5,openrouter/anthropic/claude-opus-5.5",
     "RESEARCH_PROVIDERS": "none",
     "SHADOW_MODELS": "",
     "DIRECT_ANTHROPIC": "1",
