@@ -154,6 +154,56 @@ def _align_options(parsed: PredictedOptionList, options: list[str]) -> Predicted
     )
 
 
+def _norm_option(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()
+
+
+def _parse_option_lines(text: str, options: list[str]) -> PredictedOptionList | None:
+    """
+    Reads the final "Option: NN%" lines with code, as a fallback when the
+    parser model fails. With many options (a Formula One championship had
+    about 20) the parser model failed on both members and the question went
+    unanswered. Lines are read from the end, so the final answer block wins;
+    every option must be found, or None is returned.
+    """
+    wanted = {_norm_option(o): o for o in options}
+    found: dict[str, float] = {}
+    for line in reversed(text.splitlines()):
+        left, sep, right = line.rpartition(":")
+        value = re.match(r"^\s*\**\s*([0-9]+(?:\.[0-9]+)?)\s*%?\**\s*$", right) if sep else None
+        if not value:
+            continue
+        # The name as written, then without a list bullet or number, then
+        # without an "Option A:" prefix: an option can itself start with a
+        # number ("1. FC Union Berlin vs. ...").
+        stripped = re.sub(r"^\s*[-*\d.)]+\s*", "", left)
+        candidates = (left, stripped, re.sub(r"^\s*option[_ ]?[a-z0-9]?\s*[:.)-]\s*", "", stripped, flags=re.IGNORECASE))
+        option = next((wanted[n] for n in (_norm_option(c.strip("`\"' *")) for c in candidates) if n in wanted), None)
+        if option is not None and option not in found:
+            found[option] = float(value.group(1))
+        if len(found) == len(options):
+            break
+    if len(found) != len(options):
+        # Models often copy the prompt's placeholders, "Option_A: 0.07", one
+        # letter per option in the question's order.
+        lettered: dict[int, float] = {}
+        for line in reversed(text.splitlines()):
+            m = re.match(r"^\s*\**option[_ ]([A-Z])\**\s*[:=]\s*\**\s*([0-9]+(?:\.[0-9]+)?)\s*%?", line, re.IGNORECASE)
+            if m:
+                lettered.setdefault(ord(m.group(1).upper()) - ord("A"), float(m.group(2)))
+        if sorted(lettered) != list(range(len(options))):
+            return None
+        found = {options[i]: v for i, v in lettered.items()}
+    values = [found[o] for o in options]
+    if max(values) > 1.0:
+        values = [v / 100 for v in values]
+    values = [max(v, 0.001) for v in values]
+    total = sum(values)
+    return PredictedOptionList(
+        predicted_options=[PredictedOption(option_name=o, probability=v / total) for o, v in zip(options, values)]
+    )
+
+
 async def _asknews_latest(searcher: Any, query: str) -> str:
     """AskNews latest-news search only (1 call), formatted like AskNewsSearcher's full search."""
     from asknews_sdk import AsyncAskNewsSDK
@@ -748,6 +798,11 @@ class ForecasterBot(ForecastBot):
     async def _run_forecast_on_multiple_choice(
         self, question: MultipleChoiceQuestion, research: str
     ) -> ReasonedPrediction[PredictedOptionList]:
+        # One template line per option with its exact name. The old
+        # "Option_A: Probability_A" template made models answer with letters,
+        # and the parser then mapped 6 of 80 replayed answers onto a different
+        # order than the code reading of the same letters.
+        option_lines = ("\n" + " " * 12).join(f"{name}: NN%" for name in question.options)
         prompt = clean_indents(
             f"""
             You are a professional forecaster interviewing for a job.
@@ -774,12 +829,9 @@ class ForecasterBot(ForecastBot):
             (b) The status quo outcome if nothing changed.
             (c) A description of a scenario that results in an unexpected outcome.
 
-            The last thing you write is your final probabilities for the N options
-            in this order {question.options} as:
-            Option_A: Probability_A
-            Option_B: Probability_B
-            ...
-            Option_N: Probability_N
+            The last thing you write is your final probabilities, one line per
+            option, with each option's exact name and a percentage:
+            {option_lines}
             """
         )
 
@@ -797,14 +849,27 @@ class ForecasterBot(ForecastBot):
             """
         )
         async def parse(text: str) -> PredictedOptionList | None:
-            parsed: PredictedOptionList = await structure_output(
-                text_to_structure=text,
-                output_type=PredictedOptionList,
-                model=self.get_llm("parser", "llm"),
-                num_validation_samples=self._structure_output_validation_samples,
-                additional_instructions=parsing_instructions,
-            )
-            return _align_options(parsed, question.options)
+            try:
+                parsed: PredictedOptionList = await structure_output(
+                    text_to_structure=text,
+                    output_type=PredictedOptionList,
+                    model=self.get_llm("parser", "llm"),
+                    num_validation_samples=self._structure_output_validation_samples,
+                    additional_instructions=parsing_instructions,
+                )
+                aligned = _align_options(parsed, question.options)
+            except Exception as exc:  # noqa: BLE001 - try the code reader below
+                aligned, error = None, exc
+            else:
+                error = None
+            if aligned is None:
+                fallback = _parse_option_lines(text, question.options)
+                if fallback is not None:
+                    logger.warning(f"Parser model failed on {question.page_url}; read the option lines with code")
+                    return fallback
+                if error is not None:
+                    raise error
+            return aligned
 
         answers = await self._ask_models(question, prompt, parse)
         if len(answers) == 1:
