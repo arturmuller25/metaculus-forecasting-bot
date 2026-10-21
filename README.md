@@ -13,13 +13,15 @@ skipped):
 
 1. **Research.** Several independent search providers run in parallel and
    their results are combined into one briefing, each block labeled with its
-   source: GPT-5.6 Sol web search, Claude Sonnet 5 web search, and AskNews,
+   source: GPT-5.6 Sol web search, Claude web search, and AskNews,
    Exa or Perplexity when their API keys are set. The pages and data files
    named in the resolution criteria are also downloaded by code, without an
    LLM (`resolution_fetch.py`), so the forecasters see the source itself.
-   A last call turns all of it into an evidence packet: how the question
-   resolves, up to 12 dated items with what each establishes and what it does
-   not, conflicts and missing facts (`evidence_packet.py`).
+   An optional last call (`EVIDENCE_PACKET=1`) turns all of it into an
+   evidence packet: how the question resolves, up to 12 dated items with what
+   each establishes and what it does not, conflicts and missing facts
+   (`evidence_packet.py`). It is off: it helped with Claude Sonnet 5 as a
+   member and slightly hurt with Sonnet 5.5 on two replayed rounds.
    Questions on a market series (two assets' return gap, the VIX's maximum,
    a yield or a credit spread over a window) also get a statistical baseline
    computed from market data (`market_baseline.py`). Questions on a single
@@ -136,7 +138,7 @@ All optional; defaults live in `main.py`. See `.env.example`.
 | `MARKET_QUERY_BLOCK` | off | `1` also shows that baseline to the forecasters |
 | `MARKET_QUERY_MODEL` | `openrouter/openai/gpt-5.6-sol` | model that names the series of a single-series question, at low effort |
 | `BINARY_POOL` | `logodds` | how binary members are combined: `logodds` (the mean in log-odds) or `mean` |
-| `EVIDENCE_PACKET` | on (off with `--claude-only`) | one call per question that sorts, dates and grades the research before the forecasters read it (`evidence_packet.py`); `0` turns it off |
+| `EVIDENCE_PACKET` | off | `1` adds one call per question that sorts, dates and grades the research before the forecasters read it (`evidence_packet.py`) |
 | `PACKET_MODEL` | `openrouter/openai/gpt-5.6-sol` | model that writes the evidence packet, at low effort |
 | `ANTHROPIC_API_KEY` | none | when set, Claude ensemble members are called through the Anthropic API first, with OpenRouter as the fallback |
 | `DIRECT_ANTHROPIC` | on | `0` sends Claude members through OpenRouter only |

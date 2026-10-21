@@ -214,11 +214,15 @@ def build_bot(publish: bool, samples: int) -> ForecasterBot:
         shadows.append((spec, _thinker(model.strip(), 0.3, 120, effort=effort.strip() or None)))
 
     # Evidence packet (evidence_packet.py): one call per question at low
-    # effort that sorts and dates the research. On MiniBench round 1 replays
-    # with frozen research it added 2.0 points per question (90% interval
-    # +0.8 to +3.2; numeric +3.2, binary +0.7). EVIDENCE_PACKET=0 turns it off.
+    # effort that sorts and dates the research. Off since 2026-10-21;
+    # EVIDENCE_PACKET=1 turns it on. On MiniBench round 1 replays it added
+    # 2.0 points per question with Claude Sonnet 5 as the second member
+    # (90% interval +0.8 to +3.2), but with the current pair (GPT-6.1 Sol and
+    # Sonnet 5.5) it lost 0.68 over rounds 1 and 2 (112 questions, 90%
+    # interval -1.47 to +0.03; round 2 alone -1.22, -2.35 to -0.29), mostly
+    # through Sonnet 5.5 on binaries.
     packet_llm = None
-    if os.getenv("EVIDENCE_PACKET", "1").strip() != "0":
+    if os.getenv("EVIDENCE_PACKET", "").strip() == "1":
         packet_llm = _thinker(os.getenv("PACKET_MODEL", "").strip() or PACKET_MODEL, 0.1, 120, effort="low")
 
     # Single-series market questions (market_query.py): a low-effort call
