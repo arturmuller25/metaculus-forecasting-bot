@@ -99,6 +99,10 @@ MODELS = {
     "opus55d": "anthropic/claude-opus-5-5",
     "sonnet55d": "anthropic/claude-sonnet-5-5",
     "fable51d": "anthropic/claude-fable-5-1",
+    # The agentic forecaster researching as of the forecast time
+    # (timetravel_agent.py): news, archived pages and market data from
+    # before that moment only, so resolved questions can be replayed.
+    "tt55x": "timetravel/claude-sonnet-5-5@xhigh",
 }
 
 # Two-model ensembles scored offline from the single-model answers.
@@ -512,6 +516,13 @@ class ReplayLlm:
         finally:
             if call is not None:
                 call["seconds"] = round(time.monotonic() - started, 1)
+                if self.model.startswith("timetravel/"):
+                    import timetravel_agent
+
+                    stats = timetravel_agent.LAST_CALL.get() or {}
+                    call["agent"] = {k: stats.get(k) for k in (
+                        "outcome", "cost_usd", "web_search_requests", "web_fetch_requests", "code_runs",
+                        "queries", "fetches", "input_tokens", "output_tokens", "cache_read_tokens")}
         if call is not None:
             call["raw"] = text
         return text
@@ -521,7 +532,15 @@ def replay_bot(model: str, variant: str):
     """A production bot with one ensemble member, built exactly like main.py builds members."""
     bot = main.build_bot(publish=False, samples=1)
     bot._shadows = []
-    bot._ensemble = [ReplayLlm(main._thinker(model, 0.3, FORECAST_TIMEOUT), VARIANTS[variant])]
+    bot._gap_agent = bot._supervisor = None
+    if model.startswith("timetravel/"):
+        from timetravel_agent import TimeTravelAgent
+
+        name, _, effort = model.removeprefix("timetravel/").partition("@")
+        llm = TimeTravelAgent(as_of=lambda: _TODAY.get(), model=name, effort=effort or "xhigh")
+    else:
+        llm = main._thinker(model, 0.3, FORECAST_TIMEOUT)
+    bot._ensemble = [ReplayLlm(llm, VARIANTS[variant])]
     return bot
 
 

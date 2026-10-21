@@ -311,6 +311,7 @@ class AgentForecaster:
         self.system = system or _SYSTEM
         self.answer_block = answer_block
         self.model = f"{role}/{model}"
+        self.max_client_rounds = MAX_CLIENT_ROUNDS
         # Stats of every call made through this instance, newest last.
         self.calls: list[dict] = []
         if model not in PRICES:
@@ -349,6 +350,14 @@ class AgentForecaster:
             {"type": "code_execution_20260120", "name": "code_execution"},
             _ALLOW_URL_TOOL,
         ]
+
+    def _today(self) -> str:
+        """The date the instructions give as today."""
+        return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    async def _client_results(self, calls: list[dict], s: dict) -> list[dict]:
+        """tool_result blocks for the local tools Claude called in one turn."""
+        return [self._allow_url(b, s) for b in calls]
 
     @staticmethod
     def _allow_url(block: dict, s: dict) -> dict:
@@ -501,7 +510,7 @@ class AgentForecaster:
             model=self.api_model,
             max_tokens=MAX_TOKENS,
             system=self.system.format(
-                today=datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+                today=self._today(),
                 searches=self.search_cap,
                 fetches=self.fetch_cap,
                 minutes=max(1, round(self.time_limit_s / 60)),
@@ -557,11 +566,11 @@ class AgentForecaster:
                 calls = [b for b in blocks if b.get("type") == "tool_use"]
                 if msg.stop_reason == "tool_use" and calls:
                     rounds += 1
-                    if rounds > MAX_CLIENT_ROUNDS:
-                        raise RuntimeError(f"more than {MAX_CLIENT_ROUNDS} rounds of allow_url")
+                    if rounds > self.max_client_rounds:
+                        raise RuntimeError(f"more than {self.max_client_rounds} rounds of local tools")
                     # Only tool_result blocks: the API then runs any server
                     # tool call it deferred and Claude continues the turn.
-                    messages.append({"role": "user", "content": [self._allow_url(b, s) for b in calls]})
+                    messages.append({"role": "user", "content": await self._client_results(calls, s)})
                     continue
                 break
 

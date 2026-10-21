@@ -235,6 +235,7 @@ These spend API credits and publish nothing.
 | `analyze_results.py` | scores resolved forecasts, overall and per model |
 | `numeric_replay.py` | compares the numeric CDF constructions on the bot's own questions |
 | `forecast_replay.py` | replays the forecast step with frozen research on resolved questions, to compare models and prompt variants |
+| `timetravel_agent.py` | the agentic forecaster with tools that only see the world before a question's forecast time (Google News before that day, Internet Archive captures, market data), so research can be replayed on resolved questions (`forecast_replay.py` model `tt55x`) |
 | `claude_direct_replay.py` | the same replay with Claude models on the Anthropic API (batch, effort levels) |
 | `reconcile_replay.py` | tests a reconciler step that settles member disagreements, on the same replay |
 | `numeric_rules_replay.py` | tests numeric prompt rules (floors, more percentiles) on the same replay |
