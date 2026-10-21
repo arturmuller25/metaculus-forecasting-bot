@@ -60,8 +60,9 @@ or uncertain, the real count and denominator. Skip common-knowledge rates.
 
 Step 2: pursue the targets with the tools, primary sources first (the \
 resolution source, official sites, filings, dockets, data downloads). When \
-the answer is in data, compute it in code. If the briefing already covers a \
-target well, spot-check its single most important claim and move on.
+the answer is in data, compute it in code. Make at least 3 web searches and \
+open at least 2 pages, the resolution source first, even when the briefing \
+looks complete: it can be stale, wrong, or missing the newest development.
 
 Budget: at most {searches} web searches and {fetches} page fetches, and about \
 {minutes} minutes in total. If a page cannot be read, try one alternative (an \
@@ -104,13 +105,16 @@ _VERDICT = re.compile(r"(?i)\b(likely|unlikely|probably|suggests?|points? to|we 
 def make_agent() -> AgentForecaster:
     """
     The gap-fill agent, set by GAP_FILL_MODEL (default claude-sonnet-5-5),
-    GAP_FILL_EFFORT (medium), GAP_FILL_TOOLS (searches plus fetches, 8) and
-    GAP_FILL_TIME (seconds, 240).
+    GAP_FILL_EFFORT (xhigh), GAP_FILL_TOOLS (searches plus fetches, 12) and
+    GAP_FILL_TIME (seconds, 240). At medium effort, with "spot-check and move
+    on" in place of the research floor, it made 0 to 2 searches on five
+    production prompts of 2026-10-21; at xhigh with the floor, 4 to 6
+    searches and 3 to 7 pages in 53 to 122 seconds (one of five passed 300).
     """
     return AgentForecaster(
         model=(os.getenv("GAP_FILL_MODEL") or "").strip() or "claude-sonnet-5-5",
-        effort=(os.getenv("GAP_FILL_EFFORT") or "").strip() or "medium",
-        max_tool_uses=int((os.getenv("GAP_FILL_TOOLS") or "").strip() or 8),
+        effort=(os.getenv("GAP_FILL_EFFORT") or "").strip() or "xhigh",
+        max_tool_uses=int((os.getenv("GAP_FILL_TOOLS") or "").strip() or 12),
         time_limit_s=int((os.getenv("GAP_FILL_TIME") or "").strip() or 240),
         system=SYSTEM,
         role="gapfill",

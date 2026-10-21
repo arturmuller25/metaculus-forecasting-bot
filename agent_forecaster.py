@@ -95,6 +95,11 @@ _ALLOW_URL_TOOL = {
     "strict": True,
 }
 
+# The research floor ("at least 3 web searches and ... 2 pages") is measured:
+# on five production prompts of 2026-10-20/21, with the full briefing, Claude
+# Sonnet 5.5 told "do not redo searches the briefing already answers" made
+# 0, 0, 1, 1 and 0 searches at effort high; with this floor at effort xhigh,
+# 3 to 6 searches and 2 to 4 pages (Sonnet 5 at high had made 1 to 4).
 _SYSTEM = """\
 You are an expert forecaster working alone with web_search, web_fetch, a \
 Python code_execution sandbox (call web_search and web_fetch from inside your \
@@ -128,8 +133,11 @@ rate from past releases).
 
 Budget: at most {searches} web searches and {fetches} page fetches, and about \
 {minutes} minutes in total. Spend the first calls on the resolution source. \
-Do not redo searches the briefing already answers unless a number that drives \
-the forecast needs checking. If a page cannot be read, try one alternative \
+Research before you forecast even when the briefing looks complete: it can be \
+stale, wrong, or missing the newest development. Make at least 3 web searches \
+and open at least 2 pages, the resolution source first, and check the claims \
+the forecast leans on hardest against their primary sources. If a page cannot \
+be read, try one alternative \
 (another official page, a text or API version, an archived copy), then move on \
 and say what you could not read. web_fetch can only open URLs that already \
 appear in the conversation. To open a URL you built yourself (an API query, a \

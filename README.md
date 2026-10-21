@@ -145,7 +145,7 @@ All optional; defaults live in `main.py`. See `.env.example`.
 | `REFRESH_MAX_PER_RUN` | `8` | most questions forecast per run in those modes, soonest close first |
 | `DEFERRED_MAX_PER_RUN` | `4` | most questions given deferred shadow work (the agent, gap-fill, supervisor) per run |
 | `DEFERRED_BUDGET_S` | `900` | seconds after which no further question gets deferred shadow work in a run |
-| `GAP_FILL` | off | `1` runs the gap-fill experiment (`gap_fill.py`); `GAP_FILL_MODEL`, `GAP_FILL_EFFORT`, `GAP_FILL_TOOLS`, `GAP_FILL_TIME` tune it (defaults `claude-sonnet-5-5`, `medium`, 8 searches plus fetches, 240 s) |
+| `GAP_FILL` | off | `1` runs the gap-fill experiment (`gap_fill.py`); `GAP_FILL_MODEL`, `GAP_FILL_EFFORT`, `GAP_FILL_TOOLS`, `GAP_FILL_TIME` tune it (defaults `claude-sonnet-5-5`, `xhigh`, 12 searches plus fetches, 240 s) |
 | `SUPERVISOR` | off | `1` runs the supervisor experiment (`supervisor.py`); `SUPERVISOR_MODEL`, `SUPERVISOR_EFFORT`, `SUPERVISOR_TOOLS`, `SUPERVISOR_TIME` tune it (defaults `claude-sonnet-5-5`, `high`, 6, 300 s) |
 | `PANEL_SHARE` | `1` | share of questions, chosen by post id, that get the gap-fill and supervisor experiments |
 | `EXTRA_MODES` | none | GitHub Actions repository variable: modes run with `--claude-only` after each scheduled iteration, e.g. `market_pulse,animal_futures` |
@@ -226,7 +226,7 @@ These spend API credits and publish nothing.
 | `market_query.py` | the same for single-series questions (a value on a date, a threshold on a date or in a window) |
 | `evidence_packet.py` | optional step that turns the research into a dated evidence packet |
 | `claude_search.py` | Claude's web research through the Anthropic API, with the sources it found; the OpenRouter route is the fallback |
-| `agent_forecaster.py` | agentic forecaster on the Anthropic API (web search, page reading, code execution), used as a shadow with `SHADOW_MODELS=agent/claude-sonnet-5-5@high`; it runs after the forecasts are published |
+| `agent_forecaster.py` | agentic forecaster on the Anthropic API (web search, page reading, code execution), used as a shadow with `SHADOW_MODELS=agent/claude-sonnet-5-5@xhigh` (at `high`, Sonnet 5.5 barely searched); it runs after the forecasts are published |
 | `agent_test.py` | dry-run test of the agentic forecaster on recent questions |
 | `gap_fill.py` | second research pass that verifies the briefing against primary sources (a shadow experiment) |
 | `supervisor.py` | supervisor that reconciles the independent analyses of a question (a shadow experiment) |
