@@ -100,6 +100,8 @@ jobs:
           PANEL_SHARE: ${{ vars.PANEL_SHARE }}
           DEFERRED_MAX_PER_RUN: ${{ vars.DEFERRED_MAX_PER_RUN }}
           DEFERRED_BUDGET_S: ${{ vars.DEFERRED_BUDGET_S }}
+          # "1" makes the agentic forecaster a third member (off; see main.py).
+          AGENT_MEMBER: ${{ vars.AGENT_MEMBER }}
           # Tournaments outside FutureEval, run Claude-only (Anthropic key),
           # comma-separated modes, e.g. "market_pulse,animal_futures".
           EXTRA_MODES: ${{ vars.EXTRA_MODES }}

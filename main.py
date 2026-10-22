@@ -191,6 +191,19 @@ def build_bot(publish: bool, samples: int) -> ForecasterBot:
         if os.getenv("ENSEMBLE", "1") == "0"
         else [_member(m) for m in _members]
     )
+    # AGENT_MEMBER=1 makes the agentic forecaster (agent_forecaster.py) a third
+    # member, run with the others before publishing and pooled like them,
+    # instead of a deferred shadow. Off: on MiniBench rounds 1 and 2 replayed
+    # as of each forecast time (timetravel_agent.py) the pool of three beat
+    # the pair by +0.96 points per question (90% interval -0.51 to +2.46,
+    # better on 71 of 112), short of the rule set for it (+1.0 with the
+    # interval above zero); round 3 live decides.
+    agent_member = None
+    if ensemble and os.getenv("AGENT_MEMBER", "").strip() == "1" and os.getenv("ANTHROPIC_API_KEY", "").strip():
+        from agent_forecaster import AgentForecaster
+
+        agent_member = AgentForecaster.from_spec(os.getenv("AGENT_MEMBER_SPEC", "").strip() or "agent/claude-sonnet-5-5@xhigh")
+        ensemble.append(agent_member)
 
     # Shadow models: forecast every question on the same research, recorded to
     # logs/forecasts.jsonl but never published. SHADOW_MODELS="model[@effort],..."
@@ -204,6 +217,9 @@ def build_bot(publish: bool, samples: int) -> ForecasterBot:
             # Agentic forecaster on the Anthropic API (agent_forecaster.py):
             # searches, reads pages and runs code before forecasting. It takes
             # minutes, so it runs after the run's forecasts are published.
+            # Already a member with AGENT_MEMBER=1: not run twice.
+            if agent_member is not None:
+                continue
             from agent_forecaster import AgentForecaster
 
             agent = AgentForecaster.from_spec(spec)

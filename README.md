@@ -149,6 +149,7 @@ All optional; defaults live in `main.py`. See `.env.example`.
 | `DEFERRED_BUDGET_S` | `900` | seconds after which no further question gets deferred shadow work in a run |
 | `GAP_FILL` | off | `1` runs the gap-fill experiment (`gap_fill.py`); `GAP_FILL_MODEL`, `GAP_FILL_EFFORT`, `GAP_FILL_TOOLS`, `GAP_FILL_TIME` tune it (defaults `claude-sonnet-5-5`, `xhigh`, 12 searches plus fetches, 240 s) |
 | `SUPERVISOR` | off | `1` runs the supervisor experiment (`supervisor.py`); `SUPERVISOR_MODEL`, `SUPERVISOR_EFFORT`, `SUPERVISOR_TOOLS`, `SUPERVISOR_TIME` tune it (defaults `claude-sonnet-5-5`, `high`, 6, 300 s) |
+| `AGENT_MEMBER` | off | `1` makes the agentic forecaster a third ensemble member, run before publishing and pooled with the others (`AGENT_MEMBER_SPEC`, default `agent/claude-sonnet-5-5@xhigh`); the agent shadow then stops |
 | `PANEL_SHARE` | `1` | share of questions, chosen by post id, that get the gap-fill and supervisor experiments |
 | `EXTRA_MODES` | none | GitHub Actions repository variable: modes run with `--claude-only` after each scheduled iteration, e.g. `market_pulse,animal_futures` |
 | `MAX_COST_PER_RUN` | `5.00` | cost cap per run in USD (web search cost is not tracked) |
