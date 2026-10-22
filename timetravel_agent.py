@@ -350,6 +350,30 @@ def price_history(symbol: str, source: str, days: int, as_of: datetime) -> str:
     return "\n".join(lines)
 
 
+_TT_TOOLS = (
+    "You have headline_search (Google News headlines published before today, with national "
+    "editions), fetch_page (the copy of a web page archived by the Internet Archive up to today; a "
+    "page that was not archived cannot be read), price_history (daily closes of a market or "
+    "economic series up to yesterday) and code_execution (a Python sandbox without internet; paste "
+    "data into your code to compute on it). Today is {today} (UTC)."
+)
+
+
+def as_of_instructions(system: str) -> str:
+    """
+    The gap-fill's or the supervisor's instructions (gap_fill.SYSTEM,
+    supervisor.SYSTEM) with the live web tools replaced by this module's,
+    for replays. Fails if their wording no longer matches.
+    """
+    out, n = re.subn(r"You have web_search,.*?Today is \{today\} \(UTC\)\.", lambda _m: _TT_TOOLS, system, flags=re.S)
+    out, m = re.subn(r"\s*web_fetch can only\s+open URLs.*?then fetch it\.", "", out, flags=re.S)
+    out = re.sub(r"\s*Pages that need JavaScript come back empty; prefer the\s+source's API or data download\.", "", out)
+    out = out.replace("{searches} web searches", "{searches} searches")
+    if n != 1 or m != 1:
+        raise ValueError("instructions changed; update as_of_instructions")
+    return out
+
+
 _ASKNEWS_LOCK: list = []
 
 
@@ -371,9 +395,12 @@ class TimeTravelAgent(AgentForecaster):
         max_searches: int = 6,
         max_fetches: int = 6,
         time_limit_s: int = 480,
+        system: str = SYSTEM,
+        role: str = "timetravel",
+        answer_block: bool = True,
     ) -> None:
         super().__init__(model=model, effort=effort, max_tool_uses=max_searches + max_fetches,
-                         time_limit_s=time_limit_s, system=SYSTEM, role="timetravel")
+                         time_limit_s=time_limit_s, system=system, role=role, answer_block=answer_block)
         self.as_of = as_of
         self.search_cap, self.fetch_cap = max_searches, max_fetches
         self.max_client_rounds = 24

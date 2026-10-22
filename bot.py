@@ -49,7 +49,7 @@ import supervisor as supervisor_module
 from calibration import apply_platt
 from market_baseline import baseline_for_question as market_baseline_of
 from market_baseline import block_for_question as market_block
-from numeric_cdf import SmoothDistribution
+from numeric_cdf import SmoothDistribution, is_count_question
 from resolution_fetch import fetch_resolution_sources
 
 logger = logging.getLogger(__name__)
@@ -1163,6 +1163,15 @@ class ForecasterBot(ForecastBot):
             """
         )
         low, high = question.lower_bound, question.upper_bound
+        # Counts asked on a continuous axis get a CDF in steps at the
+        # integers (numeric_cdf.is_count_question). On the 3 such questions
+        # of MiniBench rounds 1 and 2 (people charged, measles cases,
+        # screwworm cases) it scored +35 to +50 points each against the
+        # smooth CDF, scored with Metaculus's own bucket rule. NUMERIC_STEPS=0
+        # turns it off.
+        counts = os.getenv("NUMERIC_STEPS", "1").strip() != "0" and is_count_question(question)
+        if counts:
+            logger.info(f"{question.page_url}: count question, CDF in integer steps")
 
         def in_range(value: float) -> bool:
             return low is None or high is None or low - (high - low) <= value <= high + (high - low)
@@ -1184,7 +1193,7 @@ class ForecasterBot(ForecastBot):
                     num_validation_samples=self._structure_output_validation_samples,
                 )
             distribution = SmoothDistribution.build(
-                percentiles, question, method=self._cdf_method, widen=self._cdf_widen
+                percentiles, question, method=self._cdf_method, widen=self._cdf_widen, integer=counts,
             )
             # Guard: a median far outside the question's range usually means a
             # unit or power-of-ten slip in the answer or the parse.

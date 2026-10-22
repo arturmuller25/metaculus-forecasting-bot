@@ -103,6 +103,9 @@ MODELS = {
     # (timetravel_agent.py): news, archived pages and market data from
     # before that moment only, so resolved questions can be replayed.
     "tt55x": "timetravel/claude-sonnet-5-5@xhigh",
+    # supervisor.py replayed the same way, over the analyses recorded for
+    # each question (SupervisorReplay).
+    "ttsup": "ttsupervisor/claude-sonnet-5-5@high",
 }
 
 # Two-model ensembles scored offline from the single-model answers.
@@ -178,12 +181,43 @@ N = [(
     " 10th, 50th and 90th percentiles. Then adjust that distribution for what the research says, and give the"
     " reason for each adjustment.",
 )]
-VARIANTS = {"base": [], "V1": V1, "V2": V2, "V3": V3, "V4": V1 + V2 + V3, "P": [], "N": N}
+# Binary questions: the "soft clock" rule of the No-Stream bot (MIT,
+# docs/prompts.md). In its audit of 815 records, forecasts on a target date
+# the responsible actor had not bound itself to scored 18.7 points worse
+# (95% CI 5.9 to 33.4); 6% to 8% of records had that pattern.
+_INDEX_SCALE = _words(
+    "- If the question is about an index or a scale, check its floor and ceiling. An outcome outside the"
+    " range is impossible, not merely unlikely."
+)
+C = [
+    (_words("check three things that sink otherwise good forecasts:"),
+     "check four things that sink otherwise good forecasts:"),
+    (_INDEX_SCALE,
+     "- If the question is about an index or a scale, check its floor and ceiling. An outcome outside the\n"
+     "  range is impossible, not merely unlikely.\n"
+     "- A target date that the responsible actor has not bound itself to (no statute, no contract, no\n"
+     "  published schedule it has a record of meeting) shows that a target exists, not that it will hold.\n"
+     "  Estimate the chance that it lands inside the question's window from that actor's record of slips\n"
+     "  and delays; an announcement, plan, tracker page or partner statement does not raise it."),
+]
+VARIANTS = {"base": [], "V1": V1, "V2": V2, "V3": V3, "V4": V1 + V2 + V3, "P": [], "N": N, "C": C, "G": []}
 # Variants that change the research instead of the prompt: "P" appends the
-# evidence packet built by `packets` (evidence_packet.py) to the research.
+# evidence packet built by `packets` (evidence_packet.py) to the research,
+# "G" the gap-fill findings built by `gapfill` (gap_fill.py run as of the
+# forecast time with timetravel_agent.py), in the place production puts them.
 PACKET_VARIANTS = {"P"}
+GAPFILL_VARIANTS = {"G"}
 PACKETS = os.path.join(OUT, "packets")
+GAPFILL = os.path.join(OUT, "gapfill")
 PACKET_MODEL = "openrouter/openai/gpt-5.6-sol"
+
+
+def gapfill_for(post_id: int) -> str:
+    path = os.path.join(GAPFILL, f"{post_id}.md")
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"no gap-fill findings for {post_id}; run `gapfill` first")
+    with open(path, encoding="utf-8") as fh:
+        return fh.read()
 
 
 def packet_for(post_id: int) -> str:
@@ -516,7 +550,7 @@ class ReplayLlm:
         finally:
             if call is not None:
                 call["seconds"] = round(time.monotonic() - started, 1)
-                if self.model.startswith("timetravel/"):
+                if self.model.startswith(("timetravel/", "ttsupervisor/")):
                     import timetravel_agent
 
                     stats = timetravel_agent.LAST_CALL.get() or {}
@@ -526,6 +560,85 @@ class ReplayLlm:
         if call is not None:
             call["raw"] = text
         return text
+
+
+_ROW: contextvars.ContextVar[dict | None] = contextvars.ContextVar("replay_row", default=None)
+_VARIANT: contextvars.ContextVar[str] = contextvars.ContextVar("replay_variant", default="base")
+
+
+def _short(prediction) -> str:
+    """A recorded forecast in a few words, as bot._short writes a live one."""
+    if isinstance(prediction, (int, float)):
+        return f"{prediction:.1%}"
+    if isinstance(prediction, dict):
+        return ", ".join(f"{k} {v:.0%}" for k, v in prediction.items())
+    pts = sorted((p, v) for p, v in prediction)
+    xs, ys = [p for p, _ in pts], [v for _, v in pts]
+    return " | ".join(f"P{q} {bot_module._fmt_num(float(np.interp(q / 100, xs, ys)))}" for q in (5, 10, 25, 50, 75, 90, 95))
+
+
+def _pooled(predictions: list) -> str:
+    """The members' pool in words: log-odds for binaries, the mean per option, quantile averages for numerics."""
+    if isinstance(predictions[0], (int, float)):
+        return _short(bot_module._logodds_mean(predictions))
+    if isinstance(predictions[0], dict):
+        keys = list(predictions[0])
+        return _short({k: sum(p.get(k, 0.0) for p in predictions) / len(predictions) for k in keys})
+    grids = []
+    for pred in predictions:
+        pts = sorted((p, v) for p, v in pred)
+        grids.append([float(np.interp(q / 100, [p for p, _ in pts], [v for _, v in pts])) for q in (5, 10, 25, 50, 75, 90, 95)])
+    mean = np.mean(np.array(grids), axis=0)
+    return "about " + " | ".join(f"P{q} {bot_module._fmt_num(v)}" for q, v in zip((5, 10, 25, 50, 75, 90, 95), mean))
+
+
+class SupervisorReplay:
+    """
+    supervisor.py replayed: the time-limited agent with the supervisor's
+    instructions reads the analyses recorded for the current question (the
+    two members, the time-travel agent, and with variant G the members again
+    on the gap-fill findings) and answers in the bot's format. Runs used:
+    GPT-6.1 Sol SUP_SOL_REP (default 1; round 1's current-prompt answers are
+    run 3), the others run 1.
+    """
+
+    def __init__(self, model: str, effort: str) -> None:
+        self.model = f"ttsupervisor/{model}"
+        self._name, self._effort = model, effort
+
+    async def invoke(self, prompt: str) -> str:
+        import supervisor as supervisor_module
+        from timetravel_agent import TimeTravelAgent, as_of_instructions
+
+        row, variant = _ROW.get(), _VARIANT.get()
+        pid = row["post_id"]
+        sol_rep = int(os.getenv("SUP_SOL_REP", "1"))
+        latest = {}
+        for a in recorded():
+            if a["post_id"] == pid and a["status"] == "ok":
+                latest[(a["alias"], a["variant"], a["rep"])] = a
+        wanted = [("sol61", "base", sol_rep, "read the shared briefing"),
+                  ("sonnet55d", "base", 1, "read the shared briefing")]
+        if variant in GAPFILL_VARIANTS:
+            wanted += [("sol61", "G", 1, "read the shared briefing plus a second, verified research pass"),
+                       ("sonnet55d", "G", 1, "read the shared briefing plus a second, verified research pass")]
+        wanted.append(("tt55x", "base", 1, "researched on its own with web tools"))
+        analyses, members = [], []
+        for alias, var, rep, how in wanted:
+            a = latest.get((alias, var, rep))
+            if a is None or not a.get("raw"):
+                continue
+            analyses.append((how, _short(a["prediction"]), a["raw"]))
+            if var == "base" and alias != "tt55x":
+                members.append(a["prediction"])
+        if len(analyses) < 2 or not members:
+            raise RuntimeError(f"too few recorded analyses for {pid}")
+        agent = TimeTravelAgent(
+            as_of=lambda: _TODAY.get(), model=self._name, effort=self._effort,
+            system=as_of_instructions(supervisor_module.SYSTEM), role="ttsupervisor",
+            max_searches=3, max_fetches=3, time_limit_s=420,
+        )
+        return await agent.invoke(supervisor_module.message(prompt, analyses, _pooled(members)))
 
 
 def replay_bot(model: str, variant: str):
@@ -538,6 +651,9 @@ def replay_bot(model: str, variant: str):
 
         name, _, effort = model.removeprefix("timetravel/").partition("@")
         llm = TimeTravelAgent(as_of=lambda: _TODAY.get(), model=name, effort=effort or "xhigh")
+    elif model.startswith("ttsupervisor/"):
+        name, _, effort = model.removeprefix("ttsupervisor/").partition("@")
+        llm = SupervisorReplay(name, effort or "high")
     else:
         llm = main._thinker(model, 0.3, FORECAST_TIMEOUT)
     bot._ensemble = [ReplayLlm(llm, VARIANTS[variant])]
@@ -599,12 +715,16 @@ async def run_jobs(jobs: list[tuple[dict, str, str, int]]) -> None:
             call: dict = {}
             _CALL.set(call)
             _TODAY.set(datetime.fromisoformat(row["forecast_time"]))
+            _ROW.set(row)
+            _VARIANT.set(variant)
             question = question_object(row)
             status, prediction, error = "ok", None, None
             try:
                 research = row["research"]
                 if variant in PACKET_VARIANTS:
                     research = research + "\n\n" + packet_for(row["post_id"])
+                if variant in GAPFILL_VARIANTS:
+                    research = research + "\n\n" + gapfill_for(row["post_id"])
                 result = await forecast_once(bots[(alias, variant)], question, research)
                 prediction = serialize(result.prediction_value)
             except Exception as exc:  # noqa: BLE001
@@ -717,6 +837,79 @@ def cmd_packets(args) -> None:
     print(f"Key: ${remaining:.2f} left, ${drop:.2f} spent since the baseline")
 
 
+async def capture_prompt(row: dict) -> str:
+    """The forecast prompt the bot builds for this question from its frozen research, without calling a model."""
+
+    class Capture:
+        model = "capture"
+        prompt = ""
+
+        async def invoke(self, prompt: str) -> str:
+            self.prompt = prompt
+            raise RuntimeError("captured")
+
+    capture = Capture()
+    bot = main.build_bot(publish=False, samples=1)
+    bot._shadows, bot._gap_agent, bot._supervisor = [], None, None
+    bot._ensemble = [capture]
+    try:
+        await forecast_once(bot, question_object(row), row["research"])
+    except RuntimeError:
+        pass
+    if not capture.prompt:
+        raise RuntimeError(f"no prompt captured for {row['post_id']}")
+    return capture.prompt
+
+
+def cmd_gapfill(args) -> None:
+    """
+    Builds the gap-fill findings of every resolved question as of its forecast
+    time (gap_fill.py's instructions on timetravel_agent.py's tools), one
+    agent call each, for variant G. Anthropic API only.
+    """
+    import gap_fill
+    from timetravel_agent import TimeTravelAgent, as_of_instructions
+
+    os.makedirs(GAPFILL, exist_ok=True)
+    rows = [r for r in load_questions() if r["outcome"] is not None]
+    if args.posts:
+        wanted = {int(p) for p in args.posts.split(",")}
+        rows = [r for r in rows if r["post_id"] in wanted]
+    todo = [r for r in rows if not os.path.exists(os.path.join(GAPFILL, f"{r['post_id']}.md"))]
+    print(f"{len(todo)} gap-fill findings to build")
+    system = as_of_instructions(gap_fill.SYSTEM)
+
+    async def one(row: dict) -> None:
+        _CALL.set({})
+        _TODAY.set(datetime.fromisoformat(row["forecast_time"]))
+        try:
+            prompt = await capture_prompt(row)
+            agent = TimeTravelAgent(
+                as_of=lambda: _TODAY.get(), model="claude-sonnet-5-5", effort=args.effort,
+                system=system, role="ttgapfill", answer_block=False, time_limit_s=420,
+            )
+            section = await gap_fill.findings(agent, prompt)
+        except Exception as exc:  # noqa: BLE001
+            print(f"  {row['post_id']}: failed {type(exc).__name__}: {str(exc)[:200]}")
+            return
+        with open(os.path.join(GAPFILL, f"{row['post_id']}.md"), "w", encoding="utf-8") as fh:
+            fh.write(section)
+        c = agent.calls[-1] if agent.calls else {}
+        print(f"  {row['post_id']}: {len(section)} chars, searches {c.get('web_search_requests')},"
+              f" pages {c.get('web_fetch_requests')}, ${c.get('cost_usd')}")
+
+    async def go() -> None:
+        sem = asyncio.Semaphore(IN_FLIGHT)
+
+        async def guarded(row):
+            async with sem:
+                await one(row)
+
+        await asyncio.gather(*(guarded(r) for r in todo))
+
+    asyncio.run(go())
+
+
 def cmd_check_prompts(_args) -> None:
     """Builds the binary prompt of one question under every variant, without calling a model."""
     row = next(r for r in load_questions() if r["type"] == "binary" and r["outcome"] is not None)
@@ -738,7 +931,12 @@ def cmd_check_prompts(_args) -> None:
             asyncio.run(bot._run_forecast_on_binary(question_object(row), row["research"]))
         except RuntimeError:
             pass
-        edited = apply_edits(capture.prompt, edits)
+        try:
+            edited = apply_edits(capture.prompt, edits)
+        except PromptEditError as exc:
+            # V2 is in the production prompt since 2026-10-07, so its edit no longer finds its anchor.
+            print(f"\n===== {variant}: does not apply to the current prompt ({exc})")
+            continue
         start = edited.find("Today is")
         end = edited.find("Two Metaculus resolution conventions")
         print(f"\n===== {variant} (post {row['post_id']}) =====")
@@ -764,11 +962,16 @@ def clamp_options(probs: dict[str, float], options: list[str]) -> dict[str, floa
         return {o: v / s for o, v in clamped.items()}
 
 
-async def published_cdf(members: list[list[tuple[float, float]]], question) -> np.ndarray:
-    """The CDF the bot publishes from these members' percentiles: PCHIP, widened 1.15, then aggregated as in production."""
+async def published_cdf(members: list[list[tuple[float, float]]], question, integer: bool = False) -> np.ndarray:
+    """
+    The CDF the bot publishes from these members' percentiles: PCHIP, widened
+    1.15, then aggregated as in production. integer=True adds the steps at the
+    integers that production uses on count questions (numeric_cdf.is_count_question);
+    off by default so past results stay comparable.
+    """
     dists = [
         SmoothDistribution.build(
-            [Percentile(percentile=p, value=v) for p, v in pts], question, method="pchip", widen=1.15
+            [Percentile(percentile=p, value=v) for p, v in pts], question, method="pchip", widen=1.15, integer=integer
         )
         for pts in members
     ]
@@ -1102,6 +1305,9 @@ def main_cli() -> None:
     run.add_argument("--label", default="run", help="label for the balance readings")
     packets = sub.add_parser("packets", help="build the evidence packet of every resolved question (one call each)")
     packets.add_argument("--label", default="packets", help="label for the balance readings")
+    gapfill = sub.add_parser("gapfill", help="build the gap-fill findings of every resolved question as of its forecast time")
+    gapfill.add_argument("--posts", default="", help="comma-separated post ids")
+    gapfill.add_argument("--effort", default="xhigh", help="Claude effort, as in production")
     sub.add_parser("analyze", help="score everything recorded (no LLM calls)")
     args = parser.parse_args()
 
@@ -1109,7 +1315,7 @@ def main_cli() -> None:
     logger.setLevel(logging.INFO)
     os.makedirs(OUT, exist_ok=True)
     {"prepare": cmd_prepare, "check-prompts": cmd_check_prompts, "run": cmd_run, "packets": cmd_packets,
-     "analyze": cmd_analyze}[args.command](args)
+     "gapfill": cmd_gapfill, "analyze": cmd_analyze}[args.command](args)
 
 
 if __name__ == "__main__":

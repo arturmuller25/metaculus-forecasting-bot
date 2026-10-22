@@ -156,7 +156,13 @@ def bucket_of(question, outcome, size: int) -> int:
         return 0
     if location > 1:
         return inbound + 1
-    return min(inbound, int(math.floor(location * inbound + 1e-9)) + 1)
+    if location == 1:
+        return inbound
+    # Metaculus's own rule (utils/the_math/formulas.py, unscaled_location_to_bucket_index,
+    # read 2026-10-22): bucket k covers ((k-1)/N, k/N], so a value exactly on a boundary
+    # belongs to the lower bucket. Until 2026-10-22 this used floor(x N) + 1, the upper
+    # bucket, which differs only for outcomes that sit exactly on a grid point.
+    return max(int(location * inbound + 1 - 1e-10), 1)
 
 
 def pmf_at(cdf: np.ndarray, bucket: int) -> float:

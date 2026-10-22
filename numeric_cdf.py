@@ -15,6 +15,7 @@ and widen=1.0 it reproduces the library's CDF, which numeric_replay.py checks.
 
 from __future__ import annotations
 
+import re
 from typing import Literal
 
 import numpy as np
@@ -66,6 +67,51 @@ def pchip(x: np.ndarray, y: np.ndarray, at: np.ndarray) -> np.ndarray:
 
 Method = Literal["pchip", "pchip-body", "linear"]
 
+# Units that are counts of whole things; a question asked in one of them
+# ("How many people...", "Number of cases...") resolves to an integer.
+_COUNT_UNIT = re.compile(
+    r"(?i)^(people|persons?|individuals?|cases?|deaths?|fatalities|launch(es)?|events?|flights?|"
+    r"games?|goals?|seats?|votes?|countries|companies|bills?|attacks?|strikes?|earthquakes?|storms?|"
+    r"hurricanes?|ships?|vessels?|incidents?|arrests?|charges?|members?|candidates?|patients?|"
+    r"infections?|outbreaks?|medals?|drones?|missiles?|deals?|lawsuits?|executive orders?|orders?|"
+    r"meetings?|visits?|posts?|tweets?|episodes?|titles?|wins?|losses?|nations?|teams?)$"
+)
+_COUNT_TEXT = re.compile(r"(?i)\bhow many\b|\bnumber of\b|\bcount of\b")
+
+
+def is_count_question(question) -> bool:
+    """
+    A count asked on a continuous axis whose buckets are narrower than one
+    unit: "How many" or "number of" in the title, a unit that counts whole
+    things, a linear axis, and 200 buckets over fewer than 200 units. On such
+    a question every integer spans several buckets, so a smooth CDF wastes
+    most of each integer's mass on values the outcome cannot take. Discrete
+    questions already have one bucket per value.
+    """
+    unit = (getattr(question, "unit_of_measure", "") or "").strip()
+    size = getattr(question, "cdf_size", None) or NumericDefaults.DEFAULT_CDF_SIZE
+    lo, hi = getattr(question, "lower_bound", None), getattr(question, "upper_bound", None)
+    if size != NumericDefaults.DEFAULT_CDF_SIZE or getattr(question, "zero_point", None) is not None:
+        return False
+    if lo is None or hi is None or (hi - lo) / (size - 1) >= 1:
+        return False
+    return bool(_COUNT_TEXT.search(question.question_text or "")) and bool(_COUNT_UNIT.match(unit))
+
+
+def integer_steps(heights: np.ndarray, lower: float, upper: float, keep: float = 0.1) -> np.ndarray:
+    """
+    A CDF on the evenly spaced grid from lower to upper with each integer's
+    mass moved onto the integer, as a step. Metaculus scores bucket k as
+    ((k-1)/N, k/N] (utils/the_math/formulas.py), so the height at a grid
+    point x is the smooth CDF at floor(x) + 1/2: every integer up to x. A
+    share `keep` of the smooth CDF stays as a guard in case the outcome is
+    not an integer after all. The library's standardization then caps each
+    bucket at 0.19 and adds its floor.
+    """
+    xs = np.linspace(lower, upper, len(heights))
+    steps = np.interp(np.floor(xs + 1e-9) + 0.5, xs, heights)
+    return (1 - keep) * steps + keep * heights
+
 
 class SmoothDistribution(NumericDistribution):
     # "pchip" runs the cubic through the declared percentiles and the bound
@@ -81,6 +127,9 @@ class SmoothDistribution(NumericDistribution):
     # often sit on a known floor (a count already confirmed), which
     # stretching would push below; widen_low=1 keeps them where they are.
     widen_low: float | None = None
+    # Steps at the integers (integer_steps), for counts asked on a continuous
+    # axis (is_count_question).
+    integer: bool = False
 
     @classmethod
     def build(
@@ -90,9 +139,10 @@ class SmoothDistribution(NumericDistribution):
         method: Method = "pchip",
         widen: float = 1.0,
         widen_low: float | None = None,
+        integer: bool = False,
     ) -> SmoothDistribution:
         base = NumericDistribution.from_question(percentiles, question)
-        return cls(**base.model_dump(), method=method, widen=widen, widen_low=widen_low)
+        return cls(**base.model_dump(), method=method, widen=widen, widen_low=widen_low, integer=integer)
 
     def _stretched(self, declared: list[Percentile]) -> list[Percentile]:
         heights = np.array([p.percentile for p in declared])
@@ -137,7 +187,10 @@ class SmoothDistribution(NumericDistribution):
             xd, yd = x[is_declared], y[is_declared]
             body = (locations >= xd[0]) & (locations <= xd[-1])
             heights[body] = pchip(xd, yd, locations[body])
-        heights = np.clip(heights, 0.0, 1.0).tolist()
+        heights = np.clip(heights, 0.0, 1.0)
+        if self.integer and self.zero_point is None:
+            heights = integer_steps(heights, self.lower_bound, self.upper_bound)
+        heights = heights.tolist()
         if self.standardize_cdf:
             heights = self._standardize_cdf(heights)
         percentiles = [
