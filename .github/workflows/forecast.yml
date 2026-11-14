@@ -110,6 +110,11 @@ jobs:
           # Tournaments outside FutureEval, run Claude-only (Anthropic key),
           # comma-separated modes, e.g. "market_pulse,animal_futures".
           EXTRA_MODES: ${{ vars.EXTRA_MODES }}
+          # Listing by schedule in those modes (main.py, _add_open_by_time):
+          # "0" turns it off; hours during which a question the API does not
+          # call open is still tried (empty: 0, never).
+          OPEN_BY_TIME: ${{ vars.OPEN_BY_TIME }}
+          OPEN_BY_TIME_HOURS: ${{ vars.OPEN_BY_TIME_HOURS }}
         run: |
           set -uo pipefail
           # A copy of everything printed, for alerts.py (the last step).

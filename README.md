@@ -142,6 +142,8 @@ Without `--publish` the bot runs the full pipeline but submits nothing.
 
 In `market_pulse` and `animal_futures`, tournaments where bots compete with people and may update, the bot forecasts new questions and refreshes old forecasts. Market Pulse scores only the forecast standing at each question's close, so there the bot forecasts once when a question opens and once in its last `REFRESH_FINAL_HOURS` (default 12). In `animal_futures`, scored over time, it refreshes a forecast older than `REFRESH_DAYS` (default 14), or older than 12 hours within 2 days of the close.
 
+In those modes the open questions are listed twice. The library's listing asks for posts with status open and builds each group of subquestions at once, so one subquestion it cannot parse takes its open siblings out of the list with nothing in the log. The second listing reads the posts with no status filter and takes every question whose schedule says it is open now, one by one. A question the API calls open and the first list missed is added. A question the schedule calls open and the API does not is only reported in the log, unless `OPEN_BY_TIME_HOURS` is set.
+
 ## Configuration
 
 All optional; defaults live in `main.py`. See `.env.example`.
@@ -173,6 +175,8 @@ All optional; defaults live in `main.py`. See `.env.example`.
 | `REFRESH_DAYS` | `14` | age at which a forecast is refreshed in `animal_futures` |
 | `REFRESH_FINAL_HOURS` | `12` | in `market_pulse`, how long before a question's close the single refresh happens |
 | `REFRESH_MAX_PER_RUN` | `8` | most questions forecast per run in those modes, soonest close first |
+| `OPEN_BY_TIME` | on | `0` turns off the second listing of those modes, the one that reads each question's schedule |
+| `OPEN_BY_TIME_HOURS` | `0` | hours after its opening during which a question the API does not call open is still forecast; `0` only reports it in the log |
 | `DEFERRED_MAX_PER_RUN` | `4` | most questions given deferred shadow work (the agent, gap-fill, supervisor) per run |
 | `DEFERRED_BUDGET_S` | `900` | seconds after which no further question gets deferred shadow work in a run |
 | `GAP_FILL` | off | `1` runs the gap-fill experiment (`gap_fill.py`); `GAP_FILL_MODEL`, `GAP_FILL_EFFORT`, `GAP_FILL_TOOLS`, `GAP_FILL_TIME` tune it (defaults `claude-sonnet-5-5`, `xhigh`, 12 searches plus fetches, 240 s) |

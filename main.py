@@ -432,6 +432,220 @@ def _due(question, spot: bool = False) -> bool:
     return age_hours > REFRESH_DAYS * 24
 
 
+# Listings asked for when a tournament is listed by schedule: the one the
+# library itself uses, to tell whether a post came in it, and one with no
+# status filter (None), so a post the API files under any other status still
+# comes.
+SCHEDULE_STATUSES = ("open", None)
+
+
+def _api_time(value):
+    """An API date (ISO string or epoch seconds) as an aware datetime; None when absent."""
+    from datetime import datetime, timezone
+
+    if value is None or value == "":
+        return None
+    if isinstance(value, (int, float)):
+        return datetime.fromtimestamp(value, timezone.utc)
+    parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def _open_at(question_json: dict, now, check_resolution: bool = True) -> bool:
+    """
+    Whether the schedule of a question (its API JSON) says it takes forecasts
+    at `now`: open_time <= now < scheduled_close_time, not closed early and
+    not resolved. The `status` field is ignored on purpose.
+    """
+    opens = _api_time(question_json.get("open_time"))
+    closes = _api_time(question_json.get("scheduled_close_time"))
+    if opens is None or closes is None or not opens <= now < closes:
+        return False
+    for key in ("actual_close_time", "actual_resolve_time"):
+        moment = _api_time(question_json.get(key))
+        if moment is not None and moment <= now:
+            return False
+    # actual_resolve_time above is the check that counts: on 2026-11-14 the
+    # API sent `resolution` as null on all 17 resolved Market Pulse questions
+    # this account had not forecast.
+    return not check_resolution or question_json.get("resolution") in (None, "")
+
+
+def _open_by_time(posts: list, now=None, check_resolution: bool = True) -> list:
+    """
+    Question objects, built by the library's own constructors, for every
+    question and group subquestion in `posts` (post JSON from the API) that
+    is open at `now` by its schedule, whatever its `status` field says. Each
+    one is built on its own: the library builds a whole group at once and
+    drops it when any subquestion fails to parse, open or not. What cannot
+    be parsed is skipped with a warning. `posts` and `now` are parameters so
+    this runs offline in a test.
+    """
+    from datetime import datetime, timezone
+
+    from forecasting_tools import DataOrganizer
+
+    now = now or datetime.now(timezone.utc)
+    found: dict = {}
+    for post in posts:
+        post_id = post.get("id") if isinstance(post, dict) else None
+        try:
+            if "group_of_questions" in post:
+                group = post["group_of_questions"]
+                raw = group["questions"]
+            elif "question" in post:
+                group, raw = None, [post["question"]]
+            else:
+                continue  # notebook or conditional
+            group_ids = [q["id"] for q in raw]
+        except Exception as exc:
+            logger.warning(f"Listing by schedule: post {post_id} skipped: {type(exc).__name__}: {exc}")
+            continue
+        for question_json in raw:
+            try:
+                if not _open_at(question_json, now, check_resolution):
+                    continue
+                if group is None:
+                    question = DataOrganizer.get_question_from_post_json(post)
+                else:
+                    alone = {**post, "group_of_questions": {**group, "questions": [question_json]}}
+                    question = MetaculusClient._unpack_group_question(alone)[0]
+                    question.question_ids_of_group = list(group_ids)
+                found.setdefault(question.id_of_question, question)
+            except Exception as exc:
+                logger.warning(
+                    f"Listing by schedule: question {question_json.get('id')} of post {post_id} skipped: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+    return list(found.values())
+
+
+def _fetch_posts(client: MetaculusClient, tournament_id, statuses=SCHEDULE_STATUSES) -> list:
+    """
+    The posts of a tournament as API JSON, one request per listing (a status,
+    or None for no status filter) and per page of 100 (500 posts per listing
+    at most), in the library's own order. with_cp goes along, as in the
+    library's listing: on 2026-11-14 every question then carried
+    my_forecasts, which _due reads, and a listing without it carried none.
+    Each post gets a "_listed_as" key naming the listings that returned it,
+    for the warnings in _add_open_by_time. A listing that fails is skipped
+    with a warning.
+    """
+    import time
+
+    import requests
+
+    posts: dict = {}
+    for status in statuses:
+        label = status or "no filter"
+        try:
+            for page in range(5):
+                time.sleep(3)  # the forecasts go through the same API: stay far from its rate limit
+                params = {
+                    "tournaments": [tournament_id],
+                    "limit": 100,
+                    "offset": page * 100,
+                    "order_by": "-published_time",
+                    "with_cp": "true",
+                    "include_conditional_cps": "true",
+                }
+                if status:
+                    params["statuses"] = [status]
+                response = requests.get(
+                    f"{client.base_url}/posts/",
+                    params=params,
+                    headers={"Authorization": f"Token {client.token}", "Accept-Language": "en"},
+                    timeout=client.timeout,
+                )
+                response.raise_for_status()
+                results = response.json().get("results") or []
+                for post in results:
+                    posts.setdefault(post["id"], post).setdefault("_listed_as", []).append(label)
+                if len(results) < 100:
+                    break
+        except Exception as exc:
+            logger.warning(f"Listing by schedule: listing '{label}' of tournament {tournament_id} not read: {type(exc).__name__}: {exc}")
+    return list(posts.values())
+
+
+def _add_open_by_time(listed: list, client: MetaculusClient, tournament_id, now=None, posts=None) -> list:
+    """
+    The library's list of open questions plus the questions that are open by
+    their schedule and missing from it. The library asks for posts with
+    status open, builds every subquestion of each group and keeps the ones
+    whose own `status` is "open": a post the API files under another status,
+    a subquestion whose status lags its schedule and a sibling that fails to
+    parse all end with the question absent and nothing in the log. In
+    October 2026 the biweekly Market Pulse subquestions stayed out of that
+    list through two whole windows.
+
+    A missing question the API itself calls open is added. One it calls
+    anything else is only reported, unless OPEN_BY_TIME_HOURS is set: then
+    it is also added during its first hours. The default is 0: on the
+    leaderboard of 2026-11-14 no participant had more scored questions than
+    this bot, so the October subquestions probably never took forecasts, and
+    a forecast the API refuses never shows, so _due calls the question new
+    and every run pays for it again. The warnings say what the API reported
+    for each question, the evidence that was missing in October. Any failure
+    here leaves the library's list as it is. OPEN_BY_TIME=0 turns this off.
+    """
+    from datetime import datetime, timezone
+
+    if (os.getenv("OPEN_BY_TIME") or "1").strip() == "0":
+        return listed
+    try:
+        now = now or datetime.now(timezone.utc)
+        hours = float((os.getenv("OPEN_BY_TIME_HOURS") or "").strip() or 0)
+        if posts is None:
+            posts = _fetch_posts(client, tournament_id)
+        known = {q.id_of_question for q in listed}
+        extra = [q for q in _open_by_time(posts, now) if q.id_of_question not in known]
+
+        def describe(questions: list) -> str:
+            return "; ".join(
+                f"question {q.id_of_question} (post {q.id_of_post}, {q.group_question_option or 'single question'}): "
+                f"question status '{getattr(q.state, 'value', q.state)}', post status '{q.api_json.get('status')}', "
+                f"post listed as {q.api_json.get('_listed_as', 'not recorded')}, open_time {q.open_time}"
+                for q in questions
+            )
+
+        # _due takes a question with no forecast of ours as new. Without the
+        # my_forecasts block that would be every run, at full cost each time.
+        blind = [q for q in extra if not isinstance(q.api_json["question"].get("my_forecasts"), dict)]
+        left_out = {q.id_of_question for q in blind}
+        late = [
+            q
+            for q in extra
+            if q.id_of_question not in left_out
+            and getattr(q.state, "value", q.state) != "open"
+            and (now - q.open_time).total_seconds() > hours * 3600
+        ]
+        left_out |= {q.id_of_question for q in late}
+        extra = [q for q in extra if q.id_of_question not in left_out]
+        if blind:
+            logger.warning(
+                f"Tournament {tournament_id}: {len(blind)} question(s) open by schedule were left out, "
+                f"the API sent no my_forecasts for them: {describe(blind)}"
+            )
+        if late:
+            logger.warning(
+                f"Tournament {tournament_id}: {len(late)} question(s) open by schedule were left out, the API does "
+                f"not call them open (they are tried only in their first {hours:g} hours, OPEN_BY_TIME_HOURS): {describe(late)}"
+            )
+        if extra:
+            logger.warning(
+                f"Tournament {tournament_id}: {len(extra)} question(s) open by schedule were missing from "
+                f"the library's open list and were added: {describe(extra)}"
+            )
+        return listed + extra
+    except Exception as exc:
+        logger.warning(
+            f"Listing by schedule failed for tournament {tournament_id}; using the library's list only: "
+            f"{type(exc).__name__}: {exc}"
+        )
+        return listed
+
+
 # Everything through the Anthropic API (the bot maker's own credit) and free
 # sources, with no OpenRouter call and no AskNews: for tournaments outside
 # FutureEval, which the tournament-funded key and the sponsored AskNews plan
@@ -486,7 +700,8 @@ async def run(mode: str, publish: bool, samples: int, limit: int | None) -> list
             # and refresh old forecasts (see _due).
             open_questions = []
             for tid in targets[mode]:
-                open_questions += client.get_all_open_questions_from_tournament(tid)
+                listed = client.get_all_open_questions_from_tournament(tid)
+                open_questions += _add_open_by_time(listed, client, tid)
             due = [q for q in open_questions if _due(q, spot=mode in SPOT_SCORED_MODES)]
             # Soonest close first, and a cap per run, so a first pass over a
             # whole tournament spreads over several iterations instead of
