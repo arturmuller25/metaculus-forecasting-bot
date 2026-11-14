@@ -113,6 +113,28 @@ def integer_steps(heights: np.ndarray, lower: float, upper: float, keep: float =
     return (1 - keep) * steps + keep * heights
 
 
+def minimum_step(heights: list[float], floor: float = 5.05e-05) -> list[float]:
+    """
+    A CDF whose smallest step between neighbouring points is at least what
+    the library accepts. The library rejects a step below 5e-05, a floor
+    written for 200 buckets, while its own standardization leaves 0.01 per
+    bucket: 4e-05 on a question with 251 outcomes, where a flat tail then
+    fails the check. Metaculus allows up to 400 outcomes on discrete
+    questions since 2026-11-02, and on 2026-11-02 one such question failed 14
+    times in a row. Mixing in a straight line between the same two end
+    points raises the smallest step to the floor and leaves the mass outside
+    the bounds as it was. A CDF that already passes is returned unchanged.
+    """
+    h = np.asarray(heights, dtype=float)
+    smallest = float(np.diff(h).min())
+    even = float(h[-1] - h[0]) / (len(h) - 1)
+    if smallest >= 5e-05 or even <= floor:
+        return heights
+    share = (floor - smallest) / (even - smallest)
+    line = h[0] + (h[-1] - h[0]) * np.arange(len(h)) / (len(h) - 1)
+    return ((1 - share) * h + share * line).tolist()
+
+
 class SmoothDistribution(NumericDistribution):
     # "pchip" runs the cubic through the declared percentiles and the bound
     # anchors. With only P10 to P90 declared, its slope at an open bound can
@@ -192,7 +214,7 @@ class SmoothDistribution(NumericDistribution):
             heights = integer_steps(heights, self.lower_bound, self.upper_bound)
         heights = heights.tolist()
         if self.standardize_cdf:
-            heights = self._standardize_cdf(heights)
+            heights = minimum_step(self._standardize_cdf(heights))
         percentiles = [
             Percentile(value=self._cdf_location_to_nominal_location(float(loc)), percentile=h)
             for loc, h in zip(locations, heights)
