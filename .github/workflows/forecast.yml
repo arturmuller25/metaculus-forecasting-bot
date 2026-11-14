@@ -49,6 +49,7 @@ jobs:
     permissions:
       contents: read
       actions: write # to queue the next run
+      issues: write # alerts.py opens an issue when a run hides a problem
     steps:
       - name: Queue the next run
         # Production runs only: scheduled, or manual with tournament, publish
@@ -93,6 +94,10 @@ jobs:
           EXA_API_KEY: ${{ secrets.EXA_API_KEY }}
           PERPLEXITY_API_KEY: ${{ secrets.PERPLEXITY_API_KEY }}
           SHADOW_MODELS: ${{ vars.SHADOW_MODELS }}
+          # Members without tools (empty: the default pair in main.py) and the
+          # reserve that joins the pool when fewer than two members answer.
+          ENSEMBLE_MODELS: ${{ vars.ENSEMBLE_MODELS }}
+          RESERVE_MODEL: ${{ vars.RESERVE_MODEL }}
           # Deferred panel experiments, recorded only (gap_fill.py,
           # supervisor.py): "1" turns each on; PANEL_SHARE samples questions.
           GAP_FILL: ${{ vars.GAP_FILL }}
@@ -100,13 +105,17 @@ jobs:
           PANEL_SHARE: ${{ vars.PANEL_SHARE }}
           DEFERRED_MAX_PER_RUN: ${{ vars.DEFERRED_MAX_PER_RUN }}
           DEFERRED_BUDGET_S: ${{ vars.DEFERRED_BUDGET_S }}
-          # "1" makes the agentic forecaster a third member (off; see main.py).
+          # "1" makes the agentic forecaster a member (see main.py).
           AGENT_MEMBER: ${{ vars.AGENT_MEMBER }}
           # Tournaments outside FutureEval, run Claude-only (Anthropic key),
           # comma-separated modes, e.g. "market_pulse,animal_futures".
           EXTRA_MODES: ${{ vars.EXTRA_MODES }}
         run: |
           set -uo pipefail
+          # A copy of everything printed, for alerts.py (the last step).
+          mkdir -p logs
+          exec > >(tee -a logs/run_output.txt) 2>&1
+          trap 'sleep 2' EXIT # lets tee write the last lines
           if [ "${{ github.event_name }}" = "schedule" ]; then
             # Scheduled run: tournament mode, publish, loop.
             MODE=tournament
@@ -169,7 +178,20 @@ jobs:
         if: always()
         env:
           METACULUS_TOKEN: ${{ secrets.METACULUS_TOKEN }}
-        run: uv run python coverage_check.py --hours 6 || echo "coverage check failed, ignoring"
+        run: mkdir -p logs && uv run python coverage_check.py --hours 6 | tee logs/coverage.txt || echo "coverage check failed, ignoring"
+
+      - name: Alert on hidden problems
+        # Production runs only, and only with the repository variable ALERTS=1
+        # (issues in a public repository are public). The loop swallows failed
+        # iterations, so a run ends green with every Claude-only question
+        # failed: this opens an issue assigned to the owner (one per problem,
+        # not repeated while open).
+        if: always() && vars.ALERTS == '1' && (github.event_name == 'schedule' || github.event.inputs.publish == 'true')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          ALERT_KEY_BELOW: ${{ vars.ALERT_KEY_BELOW }}
+        run: uv run python alerts.py logs/run_output.txt logs/coverage.txt || echo "alerts failed, ignoring"
 
       - name: Keep reports
         if: always()
