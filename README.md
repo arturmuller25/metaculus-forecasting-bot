@@ -29,12 +29,22 @@ skipped):
    same kind of baseline, recorded as a shadow forecast only: a low-effort
    call names the series and code does the rest (`market_query.py`). On 96
    past MiniBench questions Claude tied it and showing it did not help.
-2. **Forecast.** Two models from different families (GPT-6.1 Sol and Claude
-   Sonnet 5.5) forecast every question from the same briefing. Binary
+2. **Forecast.** Two forecasters answer every question. Claude Sonnet 5.5
+   reads the briefing. The agentic forecaster (`agent_forecaster.py`, Claude
+   Sonnet 5.5 with web search, page reading and code execution) reads the
+   same briefing and then researches on its own: the resolution source,
+   anything newer, primary documents, data it can compute on. A third model,
+   GPT-6.1 Sol, answers as a reserve: it is recorded on every question and
+   joins the pool only when fewer than two forecasters answer (the agent
+   runs on the bot maker's Anthropic credit and has a time limit). Binary
    probabilities are averaged in log-odds, multiple-choice probabilities are averaged per
    option, and numeric and discrete distributions are combined by the
    pointwise median of their CDFs (each model's percentiles are read by code
-   from its final answer block, with a parser model as the fallback). On
+   from its final answer block, with a parser model as the fallback). This
+   setup is chosen with repository variables (`ENSEMBLE_MODELS`,
+   `AGENT_MEMBER`, `RESERVE_MODEL`); without them the bot runs GPT-6.1 Sol
+   and Sonnet 5.5 on the briefing alone, the pair it published until
+   2026-11-14. On
    market-series questions the published
    CDF is 80% the statistical baseline and 20% the models: on 96 resolved
    Market Pulse questions the baseline alone beat Claude's own forecasts
@@ -46,13 +56,28 @@ skipped):
 Every model's forecast is also appended to `logs/forecasts.jsonl`, so each
 model can be scored separately once questions resolve.
 
-**Experiments recorded as shadows.** After a run's forecasts are published,
-slower candidates answer the same questions and are only recorded, to be
-scored against the published forecast once questions resolve. All use the
-Anthropic API (`ANTHROPIC_API_KEY`), never the OpenRouter key.
+**How the agent became a member.** It ran as a shadow first: recorded after
+each forecast was published, never pooled. The rule written before the data
+(at least +1.0 tournament points per question over the published pair, with
+the 90% interval above zero) passed on 2026-11-14: +1.99 (+0.73 to +3.28)
+over 171 questions, 113 replayed as of their forecast time
+(`timetravel_agent.py`) and 58 live (`live_score.py`). On the same questions
+the pool of Sonnet 5.5 and the agent, without GPT-6.1 Sol, scored +3.80
+(+1.93 to +5.66), and GPT-6.1 Sol alone 3.6 points per question below the
+pair. Leaving it out was decided after seeing the live results and then
+checked on the replayed rounds, so it stays on record as the reserve and
+`live_score.py` keeps scoring the pool with and without it, under rules
+written down before those questions resolve. Most of the agent's gain came
+from distributions that were narrower where the evidence allowed it, not
+from better medians; it never opened Metaculus in the audited calls, and the
+web tools now block that domain.
 
-- The agentic forecaster (`agent_forecaster.py`): Claude with web search,
-  page reading and code execution researches on its own before answering.
+**Experiments recorded as shadows.** After a run's forecasts are published,
+slower candidates can answer the same questions and are only recorded, to be
+scored against the published forecast once questions resolve. Both use the
+Anthropic API (`ANTHROPIC_API_KEY`), never the OpenRouter key, and both are
+off.
+
 - Gap-fill (`gap_fill.py`, `GAP_FILL=1`): a second research pass that checks
   the two or three claims of the briefing a forecast would lean on hardest
   against primary sources, reads the resolution source, and fills what is
@@ -64,8 +89,9 @@ Anthropic API (`ANTHROPIC_API_KEY`), never the OpenRouter key.
   web tools, and gives a final forecast without averaging by habit
   (recorded as `supervisor/<model>`).
 
-Together they give five to six independent analyses per question, so pools of
-any subset can also be scored from the records without new calls.
+Neither met its rule: gap-fill moved the pair by +1.8 per question on the
+replayed rounds with the interval across zero and more questions worse than
+better, and the supervisor reached +1.9 (-1.0 to +4.6) over 162 questions.
 
 OpenAI and Anthropic models are called through OpenRouter. Without an
 OpenRouter key the bot falls back to the Metaculus LLM proxy, authenticated
@@ -114,7 +140,7 @@ Without `--publish` the bot runs the full pipeline but submits nothing.
 | `--samples N` | run the forecast step N times per question (default 1) |
 | `--claude-only` | use only the Anthropic API and free sources (the resolution source download, market data), never the OpenRouter key or the sponsored AskNews plan: Claude Sonnet 5 researches with its web search tool, Sonnet 5.5 and Opus 5.5 forecast |
 
-In `market_pulse` and `animal_futures`, tournaments where bots compete with people and may update, the bot forecasts new questions and refreshes a forecast older than `REFRESH_DAYS` (default 14), or older than 12 hours within 2 days of the question's close.
+In `market_pulse` and `animal_futures`, tournaments where bots compete with people and may update, the bot forecasts new questions and refreshes old forecasts. Market Pulse scores only the forecast standing at each question's close, so there the bot forecasts once when a question opens and once in its last `REFRESH_FINAL_HOURS` (default 12). In `animal_futures`, scored over time, it refreshes a forecast older than `REFRESH_DAYS` (default 14), or older than 12 hours within 2 days of the close.
 
 ## Configuration
 
@@ -127,7 +153,8 @@ All optional; defaults live in `main.py`. See `.env.example`.
 | `PARSER_MODEL` | `openrouter/openai/gpt-4o-mini` | extracts structured values from model output |
 | `REASONING_EFFORT` | `high` | reasoning effort for forecasting models |
 | `RESEARCH_REASONING` | `low` | reasoning effort for research calls |
-| `ENSEMBLE_MODELS` | GPT-6.1 Sol, Claude Sonnet 5.5 | comma-separated ensemble |
+| `ENSEMBLE_MODELS` | GPT-6.1 Sol, Claude Sonnet 5.5 | comma-separated ensemble of models that forecast from the briefing; the tournament runs set it to `openrouter/anthropic/claude-sonnet-5.5` |
+| `RESERVE_MODEL` | none | a model asked on every question, recorded as a shadow, and pooled only when fewer than two members answer; the tournament runs set it to `openrouter/openai/gpt-6.1-sol` |
 | `ENSEMBLE` | on | `0` disables the ensemble |
 | `SHADOW_MODELS` | none | models that forecast every question but are only recorded, never published, as `model[@effort]`, e.g. `openrouter/openai/gpt-5.4` |
 | `RESEARCH_PROVIDERS` | auto | force a provider list, e.g. `asknews,anthropic-search` |
@@ -143,15 +170,18 @@ All optional; defaults live in `main.py`. See `.env.example`.
 | `ANTHROPIC_API_KEY` | none | when set, Claude ensemble members are called through the Anthropic API first, with OpenRouter as the fallback |
 | `DIRECT_ANTHROPIC` | on | `0` sends Claude members through OpenRouter only |
 | `ANTHROPIC_FALLBACK` | on | `0` makes a failed direct Claude call fail instead of retrying through OpenRouter (set by `--claude-only`) |
-| `REFRESH_DAYS` | `14` | age at which a forecast is refreshed in `market_pulse` and `animal_futures` |
+| `REFRESH_DAYS` | `14` | age at which a forecast is refreshed in `animal_futures` |
+| `REFRESH_FINAL_HOURS` | `12` | in `market_pulse`, how long before a question's close the single refresh happens |
 | `REFRESH_MAX_PER_RUN` | `8` | most questions forecast per run in those modes, soonest close first |
 | `DEFERRED_MAX_PER_RUN` | `4` | most questions given deferred shadow work (the agent, gap-fill, supervisor) per run |
 | `DEFERRED_BUDGET_S` | `900` | seconds after which no further question gets deferred shadow work in a run |
 | `GAP_FILL` | off | `1` runs the gap-fill experiment (`gap_fill.py`); `GAP_FILL_MODEL`, `GAP_FILL_EFFORT`, `GAP_FILL_TOOLS`, `GAP_FILL_TIME` tune it (defaults `claude-sonnet-5-5`, `xhigh`, 12 searches plus fetches, 240 s) |
 | `SUPERVISOR` | off | `1` runs the supervisor experiment (`supervisor.py`); `SUPERVISOR_MODEL`, `SUPERVISOR_EFFORT`, `SUPERVISOR_TOOLS`, `SUPERVISOR_TIME` tune it (defaults `claude-sonnet-5-5`, `high`, 6, 300 s) |
-| `AGENT_MEMBER` | off | `1` makes the agentic forecaster a third ensemble member, run before publishing and pooled with the others (`AGENT_MEMBER_SPEC`, default `agent/claude-sonnet-5-5@xhigh`); the agent shadow then stops |
+| `AGENT_MEMBER` | off | `1` makes the agentic forecaster an ensemble member, run before publishing and pooled with the others (`AGENT_MEMBER_SPEC`, default `agent/claude-sonnet-5-5@xhigh`; needs `ANTHROPIC_API_KEY`); on in the tournament runs, never in `--claude-only` runs |
 | `PANEL_SHARE` | `1` | share of questions, chosen by post id, that get the gap-fill and supervisor experiments |
-| `EXTRA_MODES` | none | GitHub Actions repository variable: modes run with `--claude-only` after each scheduled iteration, e.g. `market_pulse,animal_futures` |
+| `EXTRA_MODES` | none | GitHub Actions repository variable: modes run with `--claude-only` after each scheduled iteration, e.g. `market_pulse` |
+| `ALERTS` | off | GitHub Actions repository variable: `1` runs `alerts.py` at the end of each production run (it opens issues, which are public in a public repository) |
+| `ALERT_KEY_BELOW` | `40` | GitHub Actions repository variable: `alerts.py` opens an issue when the OpenRouter key has less than this many dollars left |
 | `MAX_COST_PER_RUN` | `5.00` | cost cap per run in USD (web search cost is not tracked) |
 | `CALIBRATION_A`, `CALIBRATION_B` | `1.0`, `0.0` | Platt scaling coefficients |
 | `NUMERIC_CDF` | `pchip` | how percentiles become the numeric CDF: `pchip`, `pchip-body` or `linear` (the library's) |
@@ -230,7 +260,7 @@ These spend API credits and publish nothing.
 | `market_query.py` | the same for single-series questions (a value on a date, a threshold on a date or in a window) |
 | `evidence_packet.py` | optional step that turns the research into a dated evidence packet |
 | `claude_search.py` | Claude's web research through the Anthropic API, with the sources it found; the OpenRouter route is the fallback |
-| `agent_forecaster.py` | agentic forecaster on the Anthropic API (web search, page reading, code execution), used as a shadow with `SHADOW_MODELS=agent/claude-sonnet-5-5@xhigh` (at `high`, Sonnet 5.5 barely searched); it runs after the forecasts are published |
+| `agent_forecaster.py` | agentic forecaster on the Anthropic API (web search, page reading, code execution): a member with `AGENT_MEMBER=1`, or a shadow that runs after the forecasts are published with `SHADOW_MODELS=agent/claude-sonnet-5-5@xhigh` (at `high`, Sonnet 5.5 barely searched) |
 | `agent_test.py` | dry-run test of the agentic forecaster on recent questions |
 | `gap_fill.py` | second research pass that verifies the briefing against primary sources (a shadow experiment) |
 | `supervisor.py` | supervisor that reconciles the independent analyses of a question (a shadow experiment) |
@@ -246,7 +276,10 @@ These spend API credits and publish nothing.
 | `market_query_backtest.py` | the same for the single-series market questions of past MiniBench rounds |
 | `market_calibration.py` | walk-forward calibration of `market_query.py` on past dates of several series, without LLM calls |
 | `seats_replay.py` | scores ensembles of different sizes and aggregation rules from recorded replay answers, without new calls |
+| `live_score.py` | scores the recorded forecasts of production (members, the reserve, shadows) against the published pool on resolved questions, without model or API calls |
+| `panel_score.py` | scores the offline panel experiments (the replayed agent, gap-fill, supervisor) against the pair |
 | `coverage_check.py` | lists recently closed questions the bot did not forecast (runs at the end of each Actions run) |
+| `alerts.py` | opens a GitHub issue, assigned to the repository owner, when a run hides a problem: Anthropic credit exhausted, OpenRouter key low, a mode failing on every question, questions closed without a forecast |
 | `.github/workflows/forecast.yml` | scheduled runs |
 
 ## License

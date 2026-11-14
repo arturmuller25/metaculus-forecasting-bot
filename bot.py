@@ -324,6 +324,7 @@ class ForecasterBot(ForecastBot):
         *args,
         ensemble: list[GeneralLlm] | None = None,
         shadows: list[tuple[str, GeneralLlm]] | None = None,
+        reserve: tuple[str, GeneralLlm] | None = None,
         packet_llm: GeneralLlm | None = None,
         market_llm: GeneralLlm | None = None,
         gap_agent: Any = None,
@@ -387,8 +388,15 @@ class ForecasterBot(ForecastBot):
         # empty list falls back to the single default model.
         self._ensemble = list(ensemble or [])
         if self._ensemble:
-            names = ", ".join(llm.model for llm in self._ensemble)
+            names = ", ".join(getattr(llm, "record_name", llm.model) for llm in self._ensemble)
             logger.info(f"Ensemble of {len(self._ensemble)} models: {names}")
+        # A forecaster asked alongside the members on every question and kept
+        # out of the pool unless fewer than two members answer (the agent
+        # needs the Anthropic credit and can time out). Its answer is always
+        # recorded as a shadow, so the pool with and without it can be scored.
+        self._reserve = reserve
+        if reserve is not None:
+            logger.info(f"Reserve forecaster (pooled only when a member is missing): {reserve[0]}")
 
         # Research providers used in addition to the primary research model,
         # detected from the keys present or forced with RESEARCH_PROVIDERS.
@@ -678,6 +686,9 @@ class ForecasterBot(ForecastBot):
                     research = research + "\n\n" + await evidence_packet.build(self._packet_llm, question, research)
                 except Exception as exc:  # noqa: BLE001 - the research stands without it
                     logger.warning(f"Evidence packet failed for {question.page_url}: {type(exc).__name__}: {exc}")
+            # A null character (a binary page in the download) makes Metaculus
+            # reject the whole comment.
+            research = research.replace("\x00", "")
             logger.info(f"Research for {question.page_url} ({len(parts)} sources):\n{research}")
             return research
 
@@ -703,14 +714,18 @@ class ForecasterBot(ForecastBot):
         models improved Brier from 0.162 to 0.153, while repeating one model
         did not help.
         """
-        members = [(llm.model, llm) for llm in self._ensemble]
+        # record_name keeps one name per forecaster across roles: the agent
+        # is "agent/<model>@<effort>" as a member and as a shadow.
+        members = [(getattr(llm, "record_name", llm.model), llm) for llm in self._ensemble]
         if not members:
             default = self.get_llm("default", "llm")
             members = [(default.model, default)]
 
         async def ask(name: str, llm: GeneralLlm, role: str) -> tuple[str, Any, str] | None:
             try:
-                text = await llm.invoke(prompt)
+                # Metaculus rejects a comment with a null character (three
+                # numeric questions lost their comment that way in 2026-10/11).
+                text = (await llm.invoke(prompt)).replace("\x00", "")
                 prediction = await parse(text)
             except Exception as exc:
                 logger.warning(f"{name} ({role}) failed: {type(exc).__name__}: {exc}")
@@ -720,18 +735,29 @@ class ForecasterBot(ForecastBot):
                 logger.warning(f"{name} ({role}): answer could not be parsed")
                 self.model_failures[f"{name} ({role})"] = self.model_failures.get(f"{name} ({role})", 0) + 1
                 return None
-            _record(question, name, role, prediction)
+            if role != "reserve":
+                _record(question, name, role, prediction)
             return name, prediction, text
 
         quick = [(name, llm) for name, llm in self._shadows if not getattr(llm, "deferred", False)]
         self._deferred_shadows += [
             (question, name, llm, prompt, parse) for name, llm in self._shadows if getattr(llm, "deferred", False)
         ]
+        reserve = [self._reserve] if self._reserve is not None else []
         results = await asyncio.gather(
             *(ask(name, llm, "member") for name, llm in members),
+            *(ask(name, llm, "reserve") for name, llm in reserve),
             *(ask(name, llm, "shadow") for name, llm in quick),
         )
         answers = [r for r in results[: len(members)] if r is not None]
+        spare = results[len(members)] if reserve else None
+        if spare is not None:
+            _record(question, spare[0], "shadow", spare[1])
+            if len(answers) < 2:
+                missing = [name for (name, _), r in zip(members, results) if r is None] or ["a second member"]
+                logger.warning(f"{question.page_url}: {', '.join(missing)} missing; the reserve {spare[0]} joins the pool")
+                _record(question, spare[0], "member", spare[1])
+                answers.append(spare)
         if not answers:
             raise RuntimeError("every forecasting model failed on this question")
         if (self._gap_agent is not None or self._supervisor is not None) and _in_share(

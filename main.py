@@ -191,19 +191,34 @@ def build_bot(publish: bool, samples: int) -> ForecasterBot:
         if os.getenv("ENSEMBLE", "1") == "0"
         else [_member(m) for m in _members]
     )
-    # AGENT_MEMBER=1 makes the agentic forecaster (agent_forecaster.py) a third
+    # AGENT_MEMBER=1 makes the agentic forecaster (agent_forecaster.py) a
     # member, run with the others before publishing and pooled like them,
-    # instead of a deferred shadow. Off: on MiniBench rounds 1 and 2 replayed
-    # as of each forecast time (timetravel_agent.py) the pool of three beat
-    # the pair by +0.96 points per question (90% interval -0.51 to +2.46,
-    # better on 71 of 112), short of the rule set for it (+1.0 with the
-    # interval above zero); round 3 live decides.
+    # instead of a deferred shadow. The rule set on 2026-10-22 (at least +1.0
+    # points per question over the pair, 90% interval above zero) passed on
+    # 2026-11-14: +1.99 (+0.73 to +3.28) over 171 questions, 113 replayed as
+    # of each forecast time (timetravel_agent.py, +0.86) and 58 live as a
+    # shadow (live_score.py, +4.19, the agent answering within 16 minutes of
+    # the published forecast and over two hours before each question closed). With
+    # ENSEMBLE_MODELS set to Claude Sonnet 5.5 alone the pool is Sonnet and the
+    # agent, +3.80 (+1.93 to +5.66) over the pair on the same questions:
+    # GPT-6.1 Sol alone scored 3.6 points per question below the pair in both
+    # sets. That choice was made after seeing the live data and then held in
+    # the replay, so RESERVE_MODEL keeps GPT-6.1 Sol answering every question:
+    # recorded as a shadow, and pooled only when fewer than two members answer
+    # (the agent needs the Anthropic credit and can time out).
     agent_member = None
     if ensemble and os.getenv("AGENT_MEMBER", "").strip() == "1" and os.getenv("ANTHROPIC_API_KEY", "").strip():
         from agent_forecaster import AgentForecaster
 
-        agent_member = AgentForecaster.from_spec(os.getenv("AGENT_MEMBER_SPEC", "").strip() or "agent/claude-sonnet-5-5@xhigh")
+        agent_spec = os.getenv("AGENT_MEMBER_SPEC", "").strip() or "agent/claude-sonnet-5-5@xhigh"
+        agent_member = AgentForecaster.from_spec(agent_spec)
+        agent_member.record_name = agent_spec
         ensemble.append(agent_member)
+
+    reserve = None
+    reserve_model = os.getenv("RESERVE_MODEL", "").strip()
+    if ensemble and reserve_model and reserve_model not in _members:
+        reserve = (reserve_model, _member(reserve_model))
 
     # Shadow models: forecast every question on the same research, recorded to
     # logs/forecasts.jsonl but never published. SHADOW_MODELS="model[@effort],..."
@@ -269,6 +284,7 @@ def build_bot(publish: bool, samples: int) -> ForecasterBot:
     return ForecasterBot(
         ensemble=ensemble,
         shadows=shadows,
+        reserve=reserve,
         packet_llm=packet_llm,
         market_llm=market_llm,
         gap_agent=gap_agent,
@@ -379,15 +395,24 @@ def _pick(questions: list, limit: int) -> list:
 
 
 # Tournaments where the bot competes with humans and may update its
-# forecasts. Market Pulse scores the forecast standing at each question's
-# close; Animal Futures averages scores over time. Both reward a fresh
-# forecast near the close and a first forecast early.
+# forecasts. Market Pulse scores only the forecast standing at each
+# question's close; Animal Futures averages scores over time.
 REFRESHED_MODES = ("market_pulse", "animal_futures")
+SPOT_SCORED_MODES = ("market_pulse",)
 REFRESH_DAYS = float(os.getenv("REFRESH_DAYS", "") or 14)
+REFRESH_FINAL_HOURS = float(os.getenv("REFRESH_FINAL_HOURS", "") or 12)
 
 
-def _due(question) -> bool:
-    """New question, a forecast older than REFRESH_DAYS, or within 2 days of closing with a forecast older than 12 hours."""
+def _due(question, spot: bool = False) -> bool:
+    """
+    Whether a question should be forecast now. A new question always is.
+    Where only the forecast at the close counts (spot=True): once more in the
+    last REFRESH_FINAL_HOURS hours, and nothing in between, since a forecast
+    that is replaced before the close scores nothing (until 2026-11-14 each
+    Market Pulse question was forecast about five times, on a credit that ran
+    out). Elsewhere: a forecast older than REFRESH_DAYS, or older than 12
+    hours within 2 days of the close.
+    """
     from datetime import datetime, timezone
 
     try:
@@ -399,7 +424,10 @@ def _due(question) -> bool:
     now = datetime.now(timezone.utc)
     age_hours = (now - last).total_seconds() / 3600
     close = question.close_time
-    if close is not None and (close - now).total_seconds() <= 2 * 86400:
+    to_close = (close - now).total_seconds() / 3600 if close is not None else None
+    if spot:
+        return to_close is not None and to_close <= REFRESH_FINAL_HOURS and age_hours > REFRESH_FINAL_HOURS
+    if to_close is not None and to_close <= 48:
         return age_hours > 12
     return age_hours > REFRESH_DAYS * 24
 
@@ -417,6 +445,10 @@ CLAUDE_ONLY = {
     "ENSEMBLE_MODELS": "openrouter/anthropic/claude-sonnet-5.5,openrouter/anthropic/claude-opus-5.5",
     "RESEARCH_PROVIDERS": "none",
     "SHADOW_MODELS": "",
+    # The agent as a member was measured on FutureEval and MiniBench only, and
+    # the reserve would call the OpenRouter key.
+    "AGENT_MEMBER": "0",
+    "RESERVE_MODEL": "",
     "DIRECT_ANTHROPIC": "1",
     "ANTHROPIC_FALLBACK": "0",
     # The packet and the market-question reader were tested with GPT-5.6 Sol only.
@@ -455,7 +487,7 @@ async def run(mode: str, publish: bool, samples: int, limit: int | None) -> list
             open_questions = []
             for tid in targets[mode]:
                 open_questions += client.get_all_open_questions_from_tournament(tid)
-            due = [q for q in open_questions if _due(q)]
+            due = [q for q in open_questions if _due(q, spot=mode in SPOT_SCORED_MODES)]
             # Soonest close first, and a cap per run, so a first pass over a
             # whole tournament spreads over several iterations instead of
             # holding up the next FutureEval check.
