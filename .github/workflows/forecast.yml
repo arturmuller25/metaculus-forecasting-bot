@@ -115,6 +115,9 @@ jobs:
           # call open is still tried (empty: 0, never).
           OPEN_BY_TIME: ${{ vars.OPEN_BY_TIME }}
           OPEN_BY_TIME_HOURS: ${{ vars.OPEN_BY_TIME_HOURS }}
+          # "0" turns off the rendering reader of resolution sources
+          # (rendered_fetch.py).
+          RENDERED_FETCH: ${{ vars.RENDERED_FETCH }}
         run: |
           set -uo pipefail
           # A copy of everything printed, for alerts.py (the last step).

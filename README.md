@@ -17,6 +17,9 @@ skipped):
    Exa or Perplexity when their API keys are set. The pages and data files
    named in the resolution criteria are also downloaded by code, without an
    LLM (`resolution_fetch.py`), so the forecasters see the source itself.
+   A page that downloads blocked or almost empty, because JavaScript builds
+   it, is read through a rendering reader with its menus and consent
+   notices removed (`rendered_fetch.py`).
    An optional last call (`EVIDENCE_PACKET=1`) turns all of it into an
    evidence packet: how the question resolves, up to 12 dated items with what
    each establishes and what it does not, conflicts and missing facts
@@ -177,6 +180,7 @@ All optional; defaults live in `main.py`. See `.env.example`.
 | `REFRESH_MAX_PER_RUN` | `8` | most questions forecast per run in those modes, soonest close first |
 | `OPEN_BY_TIME` | on | `0` turns off the second listing of those modes, the one that reads each question's schedule |
 | `OPEN_BY_TIME_HOURS` | `0` | hours after its opening during which a question the API does not call open is still forecast; `0` only reports it in the log |
+| `RENDERED_FETCH` | on | `0` turns off the rendering reader for pages whose direct download is blocked or almost empty |
 | `DEFERRED_MAX_PER_RUN` | `4` | most questions given deferred shadow work (the agent, gap-fill, supervisor) per run |
 | `DEFERRED_BUDGET_S` | `900` | seconds after which no further question gets deferred shadow work in a run |
 | `GAP_FILL` | off | `1` runs the gap-fill experiment (`gap_fill.py`); `GAP_FILL_MODEL`, `GAP_FILL_EFFORT`, `GAP_FILL_TOOLS`, `GAP_FILL_TIME` tune it (defaults `claude-sonnet-5-5`, `xhigh`, 12 searches plus fetches, 240 s) |
@@ -260,6 +264,7 @@ These spend API credits and publish nothing.
 | `calibration.py` | Platt scaling and coefficient fitting |
 | `numeric_cdf.py` | alternative ways to build a numeric CDF from percentiles |
 | `resolution_fetch.py` | downloads the pages and data files named in the resolution criteria |
+| `rendered_fetch.py` | reads a page through the r.jina.ai reader when the direct download is blocked or almost empty; only the page URL is sent |
 | `market_baseline.py` | statistical baselines for market-series questions (filtered historical simulation on Yahoo Finance and FRED data) |
 | `market_query.py` | the same for single-series questions (a value on a date, a threshold on a date or in a window) |
 | `evidence_packet.py` | optional step that turns the research into a dated evidence packet |

@@ -9,8 +9,10 @@ For each URL (Metaculus pages excluded, at most MAX_URLS):
      question's key words when the file is large); an HTML page becomes
      plain text, plus the CSV file it links to, if any (data portals); a
      Humanitarian Data Exchange dataset is read through its CKAN API;
-  2. when the direct download is blocked or the page is built by
-     JavaScript, the r.jina.ai reader, which renders the page;
+  2. when the direct download is blocked, is a PDF, or brings almost no text
+     (a page built by JavaScript), the r.jina.ai reader, which renders the
+     page (rendered_fetch.py; RENDERED_FETCH=0 turns it off). The block
+     says "Read by rendered by r.jina.ai";
   3. as a last resort, the latest Internet Archive snapshot, labeled with
      its date.
 A URL that cannot be read is reported as such, so the forecaster knows the
@@ -31,11 +33,15 @@ from urllib.parse import urljoin
 
 import requests
 
+import rendered_fetch
+
 MAX_URLS = 4
 MAX_DOWNLOAD = 25_000_000  # bytes read from one response
 MAX_TEXT = 6_000  # characters kept per URL
+MIN_BODY = 300  # letters and digits below which a downloaded page counts as a shell
 TIMEOUT = 25
 DEADLINE = 100  # seconds for all URLs of a question together
+RENDERED = "rendered by r.jina.ai"
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -45,7 +51,7 @@ HEADERS = {
     "Accept-Language": "en-US,en;q=0.9",
 }
 
-_URL_RE = re.compile(r"https?://[^\s<>\"'\)\]\}]+")
+_URL_RE = re.compile(r"https?://[^\s<>\"'\]\}]+")
 # Bot checks and error pages that come back with a normal status.
 _BLOCKED = re.compile(
     r"Just a moment|Enable JavaScript and cookies|Attention Required|Checking your browser"
@@ -61,13 +67,33 @@ _STOP = {
 }
 
 
+def _until_unopened_parenthesis(url: str) -> str:
+    """
+    The URL up to the first ")" that closes nothing in it. A URL ends at the
+    ")" of a Markdown link or of a sentence in parentheses, but a pair inside
+    it is part of the address: ".../Tower_(OLIT)", ".../hpai-(h5n1)-in-cattle".
+    """
+    depth = 0
+    for i, char in enumerate(url):
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            if depth == 0:
+                return url[:i]
+            depth -= 1
+    return url
+
+
 def urls_in(*texts: str | None) -> list[str]:
     """Distinct URLs in the texts, in order, without Metaculus pages."""
     found: list[str] = []
     for text in texts:
-        for url in _URL_RE.findall(text or ""):
+        text, pos = text or "", 0
+        while match := _URL_RE.search(text, pos):
+            url = _until_unopened_parenthesis(match.group(0))
+            pos = match.start() + len(url)  # the search goes on right after the URL
             url = url.rstrip(".,;:!?*_")
-            if "metaculus.com" in url or url in found:
+            if url.endswith("://") or "metaculus.com" in url or url in found:
                 continue
             found.append(url)
     return found[:MAX_URLS]
@@ -240,8 +266,17 @@ def _linked_data(page_url: str, raw: str, words: list[str]) -> str:
     return f"\n\nLinked data file {link}:\n{_summarize_csv(text, words, truncated)}"
 
 
+class _Shell(str):
+    """
+    Text of a page that downloaded with almost no letters or digits in it:
+    the frame of a page that JavaScript fills in, or one whose text the
+    parser skips (an ASP.NET page is one form around everything). It is
+    worth showing only when the reader does no better.
+    """
+
+
 def _read(url: str, words: list[str]) -> str | None:
-    """Summary of a directly downloaded URL, or None when it was blocked or empty."""
+    """Summary of a directly downloaded URL, None when it was blocked or empty, a _Shell when almost empty."""
     status, ctype, text, truncated = _download(url)
     if status >= 400:
         return None
@@ -261,14 +296,19 @@ def _read(url: str, words: list[str]) -> str | None:
     if len(body) < 500 or _BLOCKED.search(body[:3000]):  # built by JavaScript, or a bot check
         return None
     title = parser.title.strip()
-    return (f"Title: {title}\n" if title else "") + _focus(body, words) + _linked_data(url, text, words)
+    linked = _linked_data(url, text, words)
+    summary = (f"Title: {title}\n" if title else "") + _focus(body, words) + linked
+    if not linked and rendered_fetch.content_size(body) < MIN_BODY:
+        return _Shell(summary)
+    return summary
 
 
 def _read_rendered(url: str, words: list[str]) -> str | None:
-    r = requests.get(f"https://r.jina.ai/{url}", headers={"Accept": "text/plain"}, timeout=40)
-    if r.status_code >= 400 or len(r.text) < 300 or _BLOCKED.search(r.text[:3000]):
+    """The page as the r.jina.ai reader renders it (rendered_fetch.py), or None."""
+    page = rendered_fetch.fetch_rendered(url)
+    if page is None:
         return None
-    return _focus(r.text, words) + _linked_data(url, r.text, words)
+    return _focus(page.text, words) + _linked_data(url, page.links, words)
 
 
 def _read_hdx(url: str, words: list[str]) -> str | None:
@@ -309,17 +349,26 @@ def _read_archived(url: str, words: list[str]) -> tuple[str, str] | None:
 def fetch_one(url: str, words: list[str]) -> tuple[str, str]:
     """(how it was read, text) for one URL; never raises."""
     errors = []
-    readers = (("HDX data API", _read_hdx), ("direct download", _read), ("rendered by r.jina.ai", _read_rendered))
+    shell = ""  # a direct download with almost no text, shown when the reader does no better
+    readers = (("HDX data API", _read_hdx), ("direct download", _read), (RENDERED, _read_rendered))
     for how, reader in readers:
         if how == "HDX data API" and "data.humdata.org/dataset/" not in url:
             continue
+        if how == RENDERED and not rendered_fetch.enabled():
+            continue
         try:
             text = reader(url, words)
-            if text:
+            if isinstance(text, _Shell):
+                shell = str(text)
+                errors.append(f"{how}: almost empty")
+            elif text and not (shell and rendered_fetch.content_size(text) <= rendered_fetch.content_size(shell)):
                 return how, text
-            errors.append(f"{how}: blocked or empty")
+            else:
+                errors.append(f"{how}: blocked or empty")
         except Exception as exc:  # network errors, timeouts, bad encodings
             errors.append(f"{how}: {type(exc).__name__}")
+    if shell:
+        return "direct download", shell
     try:
         archived = _read_archived(url, words)
         if archived:
