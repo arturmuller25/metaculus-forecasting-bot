@@ -51,7 +51,7 @@ HEADERS = {
     "Accept-Language": "en-US,en;q=0.9",
 }
 
-_URL_RE = re.compile(r"https?://[^\s<>\"'\]\}]+")
+_URL_RE = re.compile(r"https?://[^\s<>\"'\]\}]{1,2000}")
 # Bot checks and error pages that come back with a normal status.
 _BLOCKED = re.compile(
     r"Just a moment|Enable JavaScript and cookies|Attention Required|Checking your browser"
@@ -253,7 +253,10 @@ def _download(url: str) -> tuple[int, str, str, bool]:
 
 def _linked_data(page_url: str, raw: str, words: list[str]) -> str:
     """Summary of the CSV file a data portal page links to, preferring one that mentions the question's words."""
-    links = [urljoin(page_url, html.unescape(link)) for link in _CSV_LINK.findall(raw)]
+    try:
+        links = [urljoin(page_url, html.unescape(link)) for link in _CSV_LINK.findall(raw)]
+    except ValueError:  # a malformed link
+        return ""
     if not links:
         return ""
     link = next((x for x in links if any(w in x.lower() for w in words)), links[0])

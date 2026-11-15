@@ -90,13 +90,15 @@ _NOTICE = re.compile(
     re.IGNORECASE,
 )
 _CONSENT_LINE = re.compile(
-    r"^(skip to [a-z ]+)+$"
+    r"^skip to [a-z ]+$"
     r"|^(i )?(accept|reject|allow|decline|deny)( all)?( cookies)?$"
     r"|\b(accept all|reject all|only necessary|manage (consent )?preferences"
     r"|customi[sz]e (your choice|consent preferences)|save and (exit|close)|we value your privacy"
     r"|protected by recaptcha)\b",
     re.IGNORECASE,
 )
+# The path of a login, consent or challenge page a site redirects to.
+_WALL = re.compile(r"/(log-?in|sign-?in|sso|auth|consent|captcha|challenge|checkpoint)(\.[a-z]+)?(/|$)", re.IGNORECASE)
 _SPACES = re.compile(r"[ \t\r\f\v\xa0]+")  # \xa0 is the no-break space
 # A line of Markdown markup alone: rules, table separators, empty bullets and
 # check boxes. The last two characters are the middle dot and the bullet.
@@ -175,6 +177,9 @@ def _parse(raw: str) -> Page | None:
     if size < BOT_CHECK and _BOT_CHECK.search("\n".join(lines[:1] + [content])):
         return None
     if size < ALMOST_EMPTY and _SUSPECTED.search(head):
+        return None
+    final = re.search(r"(?m)^Final URL: (.+)$", head)
+    if final and size < BOT_CHECK and _WALL.search(final.group(1).split("?")[0]):
         return None
     if _CACHED.search(head):
         lines.append("Note: the reader served a stored copy of this page, which may be out of date.")
