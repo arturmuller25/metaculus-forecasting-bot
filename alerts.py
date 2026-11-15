@@ -12,6 +12,7 @@ and the coverage check's output, and opens one issue per problem found:
 - the OpenRouter key is out of credit, or below ALERT_KEY_BELOW dollars (default 40);
 - a tournament mode failed on every question it tried in this run;
 - the agentic forecaster failed as a member at least 5 times in this run;
+- the Claude Code forecasters reached the Claude subscription's usage limit;
 - questions closed without a forecast (coverage_check.py).
 
 An issue that is already open for the same problem is left alone, so a problem
@@ -35,6 +36,10 @@ PREFIX = "Bot alert: "
 SECTION = re.compile(r"Mode\s+: (\w+)")
 RESULT = re.compile(r"Questions forecast: (\d+)\. Failures: (\d+)\.")
 FAILED = re.compile(r"Failed or unparsable model answers this run: (.+)")
+# Warnings only, so the phrase inside a logged research text does not count.
+# bot.run_claude_code_shadows and cc_forecaster.py log the first form; a
+# Claude Code forecaster failing as a member logs the exception's name.
+CC_LIMIT = re.compile(r"\| WARNING \| (?:Claude Code usage limit|.*\bClaudeCodeLimit\b)")
 
 
 def read(path: str) -> list[str]:
@@ -103,6 +108,21 @@ def find_alerts(run: list[str], coverage: list[str], key_remaining: float | None
             f"The agentic forecaster failed as a member {agent} times in this run for a reason other than credit "
             "(rate limit, time limit, API error). The reserve model took its seat on those questions.\n\n"
             "Read the run's log for the agent's error lines. Close this issue once it answers again.",
+        ))
+
+    limit = [line for line in run if CC_LIMIT.search(line)]
+    if limit:
+        alerts.append((
+            "Claude Code usage limit reached",
+            f"The Claude Code CLI reported that the Claude subscription's usage limit was reached ({len(limit)} log "
+            "line(s) in this run).\n\n"
+            "While it lasts: the Claude Code shadow forecasters stop, and nothing is recorded for them until the limit "
+            "resets. The published forecasts do not change (if one of them is the agent member, the reserve model "
+            "takes its seat). The run's log has the CLI's message, which names the limit (session, week or model) "
+            "and when it resets. If that line says requests are billing to usage credits, calls beyond the plan "
+            "were charged: check Settings > Usage on claude.ai.\n\n"
+            "Nothing else to fix unless it repeats: then lower CC_MAX_PARALLEL or drop a Claude Code entry from "
+            "SHADOW_MODELS. Close this issue afterwards.",
         ))
 
     missed = [line.split("::")[-1].strip() for line in coverage if "without a forecast" in line]

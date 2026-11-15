@@ -16,6 +16,11 @@ import asyncio
 import logging
 import os
 import sys
+import time
+
+# When this process started. The Claude Code forecasters end their calls
+# RUN_DEADLINE_S seconds after it (see _claude_code).
+_STARTED = time.time()
 
 import dotenv
 
@@ -158,6 +163,38 @@ def _member(model: str):
     return _thinker(model, 0.3, 120)
 
 
+# Seconds after the start of this process by which every Claude Code call has
+# ended (RUN_DEADLINE_S overrides it; 0 means no deadline). The workflow
+# kills the main call of each iteration at 1500 seconds (`timeout 1500` in
+# forecast.yml): 1320 leaves 180 for the closing lines, so the kill finds no
+# CLI process running.
+RUN_DEADLINE_S = 1320
+
+
+def _claude_code(specs: list[str], what: str) -> list:
+    """
+    A forecaster on the Claude Code CLI for each spec ("claudecode/<model>@<effort>"
+    reads the forecast prompt, "claudecode-agent/<model>@<effort>" also
+    searches and reads pages): cc_forecaster.py, paid by the bot maker's
+    Claude subscription instead of an API key. The module is imported only
+    when a spec asks for it. Without the CLI or its credential, or on any
+    error here, the list is empty and one log line says why: these
+    forecasters must never stop a run.
+    """
+    try:
+        import cc_forecaster
+
+        ok, reason = cc_forecaster.available()
+        if ok:
+            seconds = float((os.getenv("RUN_DEADLINE_S") or "").strip() or RUN_DEADLINE_S)
+            cc_forecaster.set_deadline(_STARTED + seconds if seconds > 0 else None)
+            return [cc_forecaster.ClaudeCodeForecaster.from_spec(spec) for spec in specs]
+    except Exception as exc:  # noqa: BLE001
+        reason = f"{type(exc).__name__}: {exc}"
+    logger.warning(f"Claude Code {what} skipped: {reason}")
+    return []
+
+
 TOURNAMENT_URLS = {
     "tournament": "https://www.metaculus.com/tournament/fall-futureeval-2026/",
     "minibench": "https://www.metaculus.com/aib/minibench",
@@ -207,13 +244,21 @@ def build_bot(publish: bool, samples: int) -> ForecasterBot:
     # recorded as a shadow, and pooled only when fewer than two members answer
     # (the agent needs the Anthropic credit and can time out).
     agent_member = None
-    if ensemble and os.getenv("AGENT_MEMBER", "").strip() == "1" and os.getenv("ANTHROPIC_API_KEY", "").strip():
-        from agent_forecaster import AgentForecaster
-
+    if ensemble and os.getenv("AGENT_MEMBER", "").strip() == "1":
         agent_spec = os.getenv("AGENT_MEMBER_SPEC", "").strip() or "agent/claude-sonnet-5-5@xhigh"
-        agent_member = AgentForecaster.from_spec(agent_spec)
-        agent_member.record_name = agent_spec
-        ensemble.append(agent_member)
+        if agent_spec.startswith("claudecode-agent/"):
+            # The agent's seat on the Claude Code CLI and the Claude
+            # subscription instead of the Anthropic credit. Without the CLI
+            # or its credential there is no agent member and the reserve
+            # covers the seat.
+            agent_member = next(iter(_claude_code([agent_spec], "agent member")), None)
+        elif os.getenv("ANTHROPIC_API_KEY", "").strip():
+            from agent_forecaster import AgentForecaster
+
+            agent_member = AgentForecaster.from_spec(agent_spec)
+            agent_member.record_name = agent_spec
+        if agent_member is not None:
+            ensemble.append(agent_member)
 
     reserve = None
     reserve_model = os.getenv("RESERVE_MODEL", "").strip()
@@ -225,15 +270,19 @@ def build_bot(publish: bool, samples: int) -> ForecasterBot:
     # e.g. "openrouter/openai/gpt-5.4@medium" to test a cheaper forecaster, or
     # "anthropic/claude-opus-5-5" for a shadow paid by the Anthropic key.
     shadows = []
+    cc_specs = []
     for spec in (s.strip() for s in os.getenv("SHADOW_MODELS", "").split(",")):
         if not spec:
+            continue
+        if spec.startswith(("claudecode/", "claudecode-agent/")):
+            cc_specs.append(spec)
             continue
         if spec.startswith("agent/"):
             # Agentic forecaster on the Anthropic API (agent_forecaster.py):
             # searches, reads pages and runs code before forecasting. It takes
             # minutes, so it runs after the run's forecasts are published.
             # Already a member with AGENT_MEMBER=1: not run twice.
-            if agent_member is not None:
+            if agent_member is not None and not agent_member.model.startswith("claudecode-agent/"):
                 continue
             from agent_forecaster import AgentForecaster
 
@@ -243,6 +292,14 @@ def build_bot(publish: bool, samples: int) -> ForecasterBot:
             continue
         model, _, effort = spec.partition("@")
         shadows.append((spec, _thinker(model.strip(), 0.3, 120, effort=effort.strip() or None)))
+    # Shadows on the Claude Code CLI run last, after the deferred ones
+    # (bot.run_claude_code_shadows), under the name the forecaster gives
+    # itself. One that is already the agent member is not run twice.
+    cc_shadows = [
+        (forecaster.model, forecaster)
+        for forecaster in (_claude_code(cc_specs, "shadows") if cc_specs else [])
+        if agent_member is None or forecaster.model != agent_member.model
+    ]
 
     # Evidence packet (evidence_packet.py): one call per question at low
     # effort that sorts and dates the research. Off since 2026-10-21;
@@ -284,6 +341,7 @@ def build_bot(publish: bool, samples: int) -> ForecasterBot:
     return ForecasterBot(
         ensemble=ensemble,
         shadows=shadows,
+        cc_shadows=cc_shadows,
         reserve=reserve,
         packet_llm=packet_llm,
         market_llm=market_llm,
@@ -729,6 +787,8 @@ async def run(mode: str, publish: bool, samples: int, limit: int | None) -> list
 
     # Slow shadows (the agent) run now, after every forecast is published.
     await bot.run_deferred_shadows()
+    # Then the Claude Code shadows, which end before the run's deadline.
+    await bot.run_claude_code_shadows()
 
     after = openrouter_usage()
     print(f"\nCost tracked by the library : ${tracked:.4f}")
@@ -875,6 +935,10 @@ if __name__ == "__main__":
     # interpreter waits for it forever after main() returns. On 2026-10-09
     # two GitHub runs hung for hours after their last forecast and a question
     # was missed. Everything is written by now: flush and exit explicitly.
+    # os._exit skips the exit handlers, so a Claude Code CLI process still
+    # alive is stopped here.
+    if sys.modules.get("cc_forecaster") is not None:
+        sys.modules["cc_forecaster"].shutdown()
     logging.shutdown()
     sys.stdout.flush()
     sys.stderr.flush()

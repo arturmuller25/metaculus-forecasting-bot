@@ -324,6 +324,7 @@ class ForecasterBot(ForecastBot):
         *args,
         ensemble: list[GeneralLlm] | None = None,
         shadows: list[tuple[str, GeneralLlm]] | None = None,
+        cc_shadows: list[tuple[str, Any]] | None = None,
         reserve: tuple[str, GeneralLlm] | None = None,
         packet_llm: GeneralLlm | None = None,
         market_llm: GeneralLlm | None = None,
@@ -357,6 +358,13 @@ class ForecasterBot(ForecastBot):
         # forecaster) wait here and run after the run's forecasts are
         # published (run_deferred_shadows), so they never delay a question.
         self._deferred_shadows: list[tuple] = []
+        # Shadows on the Claude Code CLI (cc_forecaster.py, the bot maker's
+        # Claude subscription) wait in their own queue and run last, all at
+        # once (run_claude_code_shadows).
+        self._cc_shadows = list(cc_shadows or [])
+        self._cc_queue: list[tuple] = []
+        if self._cc_shadows:
+            logger.info(f"Claude Code shadows (recorded only, run last): {', '.join(n for n, _ in self._cc_shadows)}")
         # Failed or unparsable answers per model in this run, reported by main.py.
         self.model_failures: dict[str, int] = {}
         if self._shadows:
@@ -743,6 +751,7 @@ class ForecasterBot(ForecastBot):
         self._deferred_shadows += [
             (question, name, llm, prompt, parse) for name, llm in self._shadows if getattr(llm, "deferred", False)
         ]
+        self._cc_queue += [(question, name, llm, prompt, parse) for name, llm in self._cc_shadows]
         reserve = [self._reserve] if self._reserve is not None else []
         results = await asyncio.gather(
             *(ask(name, llm, "member") for name, llm in members),
@@ -767,13 +776,20 @@ class ForecasterBot(ForecastBot):
         return answers
 
     async def _shadow_answer(
-        self, question: MetaculusQuestion, name: str, llm: Any, prompt: str, parse: Callable[[str], Awaitable[Any]]
+        self, question: MetaculusQuestion, name: str, llm: Any, prompt: str, parse: Callable[[str], Awaitable[Any]],
+        reraise: tuple = (),
     ) -> tuple[str, Any, str] | None:
-        """One shadow answer, parsed and recorded; None (and a failure counted) when it fails."""
+        """
+        One shadow answer, parsed and recorded; None (and a failure counted)
+        when it fails. Exceptions of the types in `reraise` go to the caller
+        uncounted.
+        """
         key = f"{name} (shadow)"
         try:
             text = await llm.invoke(prompt)
             prediction = await parse(text)
+        except reraise:
+            raise
         except Exception as exc:
             logger.warning(f"{key} failed on {question.page_url}: {type(exc).__name__}: {exc}")
             self.model_failures[key] = self.model_failures.get(key, 0) + 1
@@ -818,6 +834,57 @@ class ForecasterBot(ForecastBot):
                     analyses.append(answer)
             if post_id in panel_of:
                 await self._run_panel(panel_of[post_id], analyses)
+
+    async def run_claude_code_shadows(self) -> None:
+        """
+        Runs the Claude Code shadows queued by _ask_models (cc_forecaster.py:
+        the Claude Code CLI on the bot maker's Claude subscription), after
+        the deferred shadows, so they never delay a forecast. Every queued
+        call starts at once: the module caps how many CLI processes run
+        together (CC_MAX_PARALLEL) and ends every call before the run's
+        deadline (RUN_DEADLINE_S in main.py). Each answer is recorded as a
+        shadow and never pooled. A call the module skipped for lack of time
+        is not a model failure, and once the subscription's usage limit is
+        reached the calls that have not started their CLI process are
+        skipped (the ones already running end by themselves); these are
+        samples, not coverage. The module's call log (logs/cc_calls.jsonl)
+        gets each question's post id and question id, to match a recorded
+        forecast with the time limit its call ran with.
+        """
+        pending, self._cc_queue = self._cc_queue, []
+        if not pending:
+            return
+        import cc_forecaster  # main.py loaded it when a spec asked for it
+
+        uncounted = (cc_forecaster.ClaudeCodeLimit, cc_forecaster.ClaudeCodeSkipped)
+        count = {"recorded": 0, "failed": 0, "no time": 0, "usage limit": 0}
+
+        async def one(question: MetaculusQuestion, name: str, llm: Any, prompt: str, parse: Callable) -> None:
+            if count["usage limit"]:
+                count["usage limit"] += 1
+                return
+            # Each of these runs as a task of its own, so the tag is this call's alone.
+            cc_forecaster.CALL_TAG.set({"post_id": question.id_of_post, "question_id": question.id_of_question})
+            try:
+                answer = await self._shadow_answer(question, name, llm, prompt, parse, reraise=uncounted)
+            except cc_forecaster.ClaudeCodeLimit as exc:
+                if not count["usage limit"]:
+                    # alerts.py opens an issue on this line.
+                    logger.warning(f"Claude Code usage limit reached: {exc}. The Claude Code shadows still waiting are skipped")
+                count["usage limit"] += 1
+            except cc_forecaster.ClaudeCodeSkipped:
+                count["no time"] += 1
+            else:
+                count["recorded" if answer is not None else "failed"] += 1
+
+        results = await asyncio.gather(*(one(*item) for item in pending), return_exceptions=True)
+        for error in (r for r in results if isinstance(r, BaseException)):
+            logger.warning(f"Claude Code shadow failed outside its call: {type(error).__name__}: {error}")
+        logger.info(
+            f"Claude Code shadows: {len(pending)} queued, {count['recorded']} recorded, {count['failed']} failed, "
+            f"{count['no time']} skipped for lack of time before the run's deadline, "
+            f"{count['usage limit']} stopped by the usage limit"
+        )
 
     async def _run_panel(self, panel: tuple, agent_answers: list[tuple[str, Any, str]]) -> None:
         """

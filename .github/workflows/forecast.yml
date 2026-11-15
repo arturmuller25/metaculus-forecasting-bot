@@ -50,6 +50,12 @@ jobs:
       contents: read
       actions: write # to queue the next run
       issues: write # alerts.py opens an issue when a run hides a problem
+    env:
+      # "true" when the repository has the secret CLAUDE_CODE_OAUTH_TOKEN (a
+      # step's `if` cannot read secrets). Without it no step below changes.
+      HAS_CLAUDE_CODE: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}
+      # Read by the Claude Code CLI only: it stays on the installed version.
+      DISABLE_AUTOUPDATER: "1"
     steps:
       - name: Queue the next run
         # Production runs only: scheduled, or manual with tournament, publish
@@ -72,6 +78,16 @@ jobs:
 
       - name: Install dependencies
         run: uv sync --frozen
+
+      - name: Install the Claude Code CLI
+        # For the forecasters in cc_forecaster.py, which run on the bot
+        # maker's Claude subscription. The version is pinned: the flags and
+        # the checks of that module were tested on it. A failed install does
+        # not stop the run: the bot skips those forecasters with one log line.
+        if: env.HAS_CLAUDE_CODE == 'true'
+        run: |
+          timeout 300 npm install -g @anthropic-ai/claude-code@2.1.325 && claude --version \
+            || echo "::warning::The Claude Code CLI was not installed; its forecasters are skipped in this run"
 
       - name: Run the bot
         timeout-minutes: 340
@@ -105,8 +121,23 @@ jobs:
           PANEL_SHARE: ${{ vars.PANEL_SHARE }}
           DEFERRED_MAX_PER_RUN: ${{ vars.DEFERRED_MAX_PER_RUN }}
           DEFERRED_BUDGET_S: ${{ vars.DEFERRED_BUDGET_S }}
-          # "1" makes the agentic forecaster a member (see main.py).
+          # "1" makes the agentic forecaster a member (see main.py); the spec
+          # names which one (empty: agent/claude-sonnet-5-5@xhigh).
           AGENT_MEMBER: ${{ vars.AGENT_MEMBER }}
+          AGENT_MEMBER_SPEC: ${{ vars.AGENT_MEMBER_SPEC }}
+          # Forecasters on the Claude Code CLI (cc_forecaster.py), named in
+          # SHADOW_MODELS as claudecode/<model>@<effort> or
+          # claudecode-agent/<model>@<effort> and recorded only. The token of
+          # the bot maker's Claude subscription (`claude setup-token`) goes to
+          # this step alone; without it they are skipped. RUN_DEADLINE_S:
+          # seconds from the start of main.py by which their calls end
+          # (empty: 1320, inside the 1500 of the loop below). CC_MAX_PARALLEL:
+          # CLI processes at once (empty: the default in cc_forecaster.py).
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          RUN_DEADLINE_S: ${{ vars.RUN_DEADLINE_S }}
+          CC_MAX_PARALLEL: ${{ vars.CC_MAX_PARALLEL }}
+          # An ISO time before which no Claude Code call is made.
+          CC_NOT_BEFORE: ${{ vars.CC_NOT_BEFORE }}
           # Tournaments outside FutureEval, run Claude-only (Anthropic key),
           # comma-separated modes, e.g. "market_pulse,animal_futures".
           EXTRA_MODES: ${{ vars.EXTRA_MODES }}

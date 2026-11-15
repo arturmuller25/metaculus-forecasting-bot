@@ -96,6 +96,31 @@ Neither met its rule: gap-fill moved the pair by +1.8 per question on the
 replayed rounds with the interval across zero and more questions worse than
 better, and the supervisor reached +1.9 (-1.0 to +4.6) over 162 questions.
 
+**Forecasters on the Claude Code CLI.** `cc_forecaster.py` runs the Claude
+Code command-line program without its interface as a forecaster, so its calls
+draw on the bot maker's Claude subscription instead of API credit. It has two
+forms, named in `SHADOW_MODELS`:
+
+- `claudecode/<model>@<effort>` reads the forecast prompt and answers, like a
+  member on the API;
+- `claudecode-agent/<model>@<effort>` searches the web and reads pages first,
+  with no shell and no file access, for example
+  `claudecode-agent/claude-opus-5-5@xhigh`.
+
+They run as shadows, in a last phase: after the run's forecasts are published
+and after the deferred shadows, every queued call starts, `CC_MAX_PARALLEL`
+at a time, and each answer is recorded and never pooled. Every call ends
+before `RUN_DEADLINE_S`: one that starts late gets a shorter time limit, and
+one with too little time left is skipped. On GitHub Actions
+the CLI is installed, at a pinned version, only when the repository has the
+secret `CLAUDE_CODE_OAUTH_TOKEN`, a token created with `claude setup-token`;
+on a personal machine the CLI's own login is used. Without the CLI or a
+credential the bot logs one line and goes on. The CLI process gets that
+token and no other key of the bot. When the CLI reports that the
+subscription's usage limit was reached, the calls still waiting are skipped
+and `alerts.py` opens an issue. `--claude-only` runs do not use these
+forecasters.
+
 OpenAI and Anthropic models are called through OpenRouter. Without an
 OpenRouter key the bot falls back to the Metaculus LLM proxy, authenticated
 with `METACULUS_TOKEN`.
@@ -161,7 +186,7 @@ All optional; defaults live in `main.py`. See `.env.example`.
 | `ENSEMBLE_MODELS` | GPT-6.1 Sol, Claude Sonnet 5.5 | comma-separated ensemble of models that forecast from the briefing; the tournament runs set it to `openrouter/anthropic/claude-sonnet-5.5` |
 | `RESERVE_MODEL` | none | a model asked on every question, recorded as a shadow, and pooled only when fewer than two members answer; the tournament runs set it to `openrouter/openai/gpt-6.1-sol` |
 | `ENSEMBLE` | on | `0` disables the ensemble |
-| `SHADOW_MODELS` | none | models that forecast every question but are only recorded, never published, as `model[@effort]`, e.g. `openrouter/openai/gpt-5.4` |
+| `SHADOW_MODELS` | none | models that forecast every question but are only recorded, never published, as `model[@effort]`, e.g. `openrouter/openai/gpt-5.4`; `claudecode/...` and `claudecode-agent/...` entries run on the Claude Code CLI |
 | `RESEARCH_PROVIDERS` | auto | force a provider list, e.g. `asknews,anthropic-search` |
 | `RESOLUTION_FETCH` | on | `0` turns off downloading the resolution sources |
 | `MARKET_BASELINE` | on | `0` turns off the market statistics block in the research |
@@ -186,6 +211,11 @@ All optional; defaults live in `main.py`. See `.env.example`.
 | `GAP_FILL` | off | `1` runs the gap-fill experiment (`gap_fill.py`); `GAP_FILL_MODEL`, `GAP_FILL_EFFORT`, `GAP_FILL_TOOLS`, `GAP_FILL_TIME` tune it (defaults `claude-sonnet-5-5`, `xhigh`, 12 searches plus fetches, 240 s) |
 | `SUPERVISOR` | off | `1` runs the supervisor experiment (`supervisor.py`); `SUPERVISOR_MODEL`, `SUPERVISOR_EFFORT`, `SUPERVISOR_TOOLS`, `SUPERVISOR_TIME` tune it (defaults `claude-sonnet-5-5`, `high`, 6, 300 s) |
 | `AGENT_MEMBER` | off | `1` makes the agentic forecaster an ensemble member, run before publishing and pooled with the others (`AGENT_MEMBER_SPEC`, default `agent/claude-sonnet-5-5@xhigh`; needs `ANTHROPIC_API_KEY`); on in the tournament runs, never in `--claude-only` runs |
+| `AGENT_MEMBER_SPEC` | `agent/claude-sonnet-5-5@xhigh` | which agent takes that seat: `agent/<model>@<effort>` on the Anthropic API, or `claudecode-agent/<model>@<effort>` on the Claude Code CLI (needs the CLI and its credential instead of `ANTHROPIC_API_KEY`; without them there is no agent member and the reserve covers the seat) |
+| `CLAUDE_CODE_OAUTH_TOKEN` | none | GitHub Actions secret: the token of a Claude subscription (`claude setup-token`) for the `claudecode/` and `claudecode-agent/` forecasters; with it the workflow installs the Claude Code CLI |
+| `RUN_DEADLINE_S` | `1320` | seconds after the start of `main.py` by which every Claude Code call has ended (the workflow stops the main call of an iteration at 1500); `0` sets no deadline |
+| `CC_MAX_PARALLEL` | `4` | Claude Code CLI processes running at once |
+| `CC_NOT_BEFORE` | none | ISO time (UTC without an offset) before which no Claude Code call is made, e.g. the reset of the subscription's weekly limit |
 | `PANEL_SHARE` | `1` | share of questions, chosen by post id, that get the gap-fill and supervisor experiments |
 | `EXTRA_MODES` | none | GitHub Actions repository variable: modes run with `--claude-only` after each scheduled iteration, e.g. `market_pulse` |
 | `ALERTS` | off | GitHub Actions repository variable: `1` runs `alerts.py` at the end of each production run (it opens issues, which are public in a public repository) |
@@ -208,7 +238,9 @@ with the schedule as a backup; disable the workflow to stop the bot. Add
 `METACULUS_TOKEN` and `OPENROUTER_API_KEY` (plus any optional
 provider keys) as repository secrets. Calibration coefficients go in as
 repository variables. Manual runs from the Actions tab let you choose the mode
-and whether to publish.
+and whether to publish. The optional secret `CLAUDE_CODE_OAUTH_TOKEN` adds one
+step, which installs the Claude Code CLI; the token goes to the step that runs
+the bot and to no other.
 
 ## Measuring results
 
@@ -270,6 +302,7 @@ These spend API credits and publish nothing.
 | `evidence_packet.py` | optional step that turns the research into a dated evidence packet |
 | `claude_search.py` | Claude's web research through the Anthropic API, with the sources it found; the OpenRouter route is the fallback |
 | `agent_forecaster.py` | agentic forecaster on the Anthropic API (web search, page reading, code execution): a member with `AGENT_MEMBER=1`, or a shadow that runs after the forecasts are published with `SHADOW_MODELS=agent/claude-sonnet-5-5@xhigh` (at `high`, Sonnet 5.5 barely searched) |
+| `cc_forecaster.py` | forecaster on the Claude Code CLI and a Claude subscription: `claudecode/<model>@<effort>` (prompt only) and `claudecode-agent/<model>@<effort>` (web search and page reading), run as shadows after everything else |
 | `agent_test.py` | dry-run test of the agentic forecaster on recent questions |
 | `gap_fill.py` | second research pass that verifies the briefing against primary sources (a shadow experiment) |
 | `supervisor.py` | supervisor that reconciles the independent analyses of a question (a shadow experiment) |
@@ -288,7 +321,7 @@ These spend API credits and publish nothing.
 | `live_score.py` | scores the recorded forecasts of production (members, the reserve, shadows) against the published pool on resolved questions, without model or API calls |
 | `panel_score.py` | scores the offline panel experiments (the replayed agent, gap-fill, supervisor) against the pair |
 | `coverage_check.py` | lists recently closed questions the bot did not forecast (runs at the end of each Actions run) |
-| `alerts.py` | opens a GitHub issue, assigned to the repository owner, when a run hides a problem: Anthropic credit exhausted, OpenRouter key low, a mode failing on every question, questions closed without a forecast |
+| `alerts.py` | opens a GitHub issue, assigned to the repository owner, when a run hides a problem: Anthropic credit exhausted, OpenRouter key low, a mode failing on every question, the Claude subscription's usage limit reached, questions closed without a forecast |
 | `.github/workflows/forecast.yml` | scheduled runs |
 
 ## License
