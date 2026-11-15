@@ -938,7 +938,10 @@ if __name__ == "__main__":
     # os._exit skips the exit handlers, so a Claude Code CLI process still
     # alive is stopped here.
     if sys.modules.get("cc_forecaster") is not None:
-        sys.modules["cc_forecaster"].shutdown()
+        try:
+            sys.modules["cc_forecaster"].shutdown()
+        except Exception:  # noqa: BLE001 - nothing may stop the exit below
+            pass
     logging.shutdown()
     sys.stdout.flush()
     sys.stderr.flush()
