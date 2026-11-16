@@ -20,6 +20,26 @@ at least 100 questions with the 90% interval above zero):
   trio     the published members and the GPT-6.1 Sol reserve        Sol returns as a member at +1.0/q
   oldpair  Sonnet 5.5 and the reserve, the pair of before           the agent leaves if this is above zero
 
+Since 2026-11-16 the Claude Code shadows (cc_forecaster.py, recorded as
+"claudecode/<model>@<effort>", "claudecode-agent/<model>@<effort>", a prompt
+variant as "<that name>+<variant>") are scored, each S against the published
+pool, in four comparisons (rule fixed on 2026-11-16, before any of them
+resolved):
+
+  pool+S     the published members and S                           S joins at +1.0/q, CI90 lower > 0, n >= 50
+  alone      S in place of the pool                                 read only
+  claude+S   S in the other member's seat, beside the Claude member read only
+  S for Sol  S in GPT-6.1 Sol's seat, when Sol is a member          read only
+
+A variant is also scored against its control (the same model and effort
+without the variant, both alone, on the questions both answered) and a
+referee ("claudecode-referee/<model>@<effort>") alone in place of the pool;
+both read only. These tables, the coverage of each shadow (questions answered
+and minutes from the publication to its record) and the state of every rule
+above are printed with --rules, and on their own once a Claude Code shadow is
+among the scored questions. --coverage <date> prints the coverage straight
+from the records of the questions forecast since that date, resolved or not.
+
 Rules fixed before the results (2026-10-21 and 22, panel_score.py). The
 difference in log score is the difference in spot peer score: the other
 forecasters' term is the same on both sides. Members are pooled as production
@@ -33,7 +53,8 @@ the ones where the two match.
 Usage:
     uv run python live_score.py --round 33132:logs/replay_r3 --round 33135:logs/replay_r4 \
         --round 33121:logs/replay_fall --offline logs/panel_scores/33125.json --offline logs/panel_scores/33129.json
-Per-question rows go to logs/live_scores/<project>.json.
+Per-question rows go to logs/live_scores/<project>.json. While a round is open:
+    uv run python live_score.py --coverage 2026-11-16
 """
 
 from __future__ import annotations
@@ -46,7 +67,7 @@ import logging
 import math
 import os
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 
 import numpy as np
 
@@ -58,6 +79,70 @@ OUT = os.path.join("logs", "live_scores")
 # Member records are written seconds to minutes before the forecast is
 # published; shadows that wait for the publication come later in the same run.
 BEFORE_S, AFTER_S = 45 * 60, 5 * 60
+GROUPS = ("all", "all but multiple choice", "binary", "numeric+discrete", "multiple_choice")
+
+CC_PREFIXES = ("claudecode/", "claudecode-agent/", "claudecode-referee/")
+REFEREE = "claudecode-referee/"
+CC_COMPARISONS = ("pool+S", "alone", "claude+S", "S for Sol")
+# The rules, as fixed: (name, what, the diff it reads, mean gain per question,
+# minimum questions). Each passes when the 90% interval's lower end is above
+# zero too. No minimum was fixed for agent3; an interval needs two questions.
+RULES = (
+    ("agent3", "the agent shadow joins the pool (2026-10-21)", "agent3", 1.0, 2),
+    ("sup", "the supervisor in place of the pool (2026-10-22)", "sup", 1.5, 50),
+    ("trio", "GPT-6.1 Sol returns as a member (2026-11-14)", "trio", 1.0, 100),
+    ("oldpair", "the agent leaves the members (2026-11-14)", "oldpair", 0.0, 100),
+)
+CC_RULE_GAIN, CC_RULE_N = 1.0, 50  # pool+S, fixed on 2026-11-16
+
+
+def is_cc(model: str) -> bool:
+    """A forecaster on the Claude Code CLI (cc_forecaster.py)."""
+    return model.startswith(CC_PREFIXES)
+
+
+def control_of(model: str) -> str | None:
+    """The Claude Code shadow a prompt variant is measured against: "<spec>+<variant>" -> "<spec>"."""
+    head, sep, _ = model.partition("+")
+    return head if sep and is_cc(model) else None
+
+
+def ci90(d: list[float]) -> tuple[float, float, float]:
+    """(mean, 5th and 95th percentiles of the bootstrap mean), computed as boot() does; nan without two values."""
+    a = np.array(d, dtype=float)
+    if len(a) < 2:
+        return (float(a.mean()) if len(a) else math.nan), math.nan, math.nan
+    means = np.random.default_rng(0).choice(a, size=(20000, len(a)), replace=True).mean(axis=1)
+    return float(a.mean()), float(np.percentile(means, 5)), float(np.percentile(means, 95))
+
+
+def rule_status(d: list[float], gain: float, min_n: int) -> str:
+    """'passed', 'not passed', or how many questions are still missing."""
+    need = max(min_n, 2)
+    if len(d) < need:
+        return f"{need - len(d)} questions to go"
+    mean, lo, _ = ci90(d)
+    return "passed" if mean >= gain and lo > 0 else "not passed"
+
+
+def by_group(rows: list[tuple[str, float]]) -> list[tuple[str, list[float]]]:
+    """The values of (group, value) rows for each group of GROUPS that has any."""
+    out = []
+    for g in GROUPS:
+        d = [v for kind, v in rows if g == "all" or kind == g or (g == "all but multiple choice" and kind != "multiple_choice")]
+        if d:
+            out.append((g, d))
+    return out
+
+
+def shadow_times(rows: list[dict], published_at: float) -> dict[str, float]:
+    """Seconds from the publication to each shadow's record, for the records pick() takes."""
+    latest: dict[str, float] = {}
+    for r in rows:
+        if r["role"] == "shadow" and r["t"] >= published_at - BEFORE_S:
+            if r["model"] not in latest or r["t"] > latest[r["model"]]:
+                latest[r["model"]] = r["t"]
+    return {m: t - published_at for m, t in latest.items()}
 
 
 def boot(d: list[float]) -> str:
@@ -193,13 +278,13 @@ async def score_round(project: str, folder: str, records: dict[int, dict[str, li
         else:
             item["gap"], item["match"] = None, False
 
-        async def diff(name: str, forecasts: list) -> None:
+        async def diff(name: str, forecasts: list, into: dict | None = None, key: str | None = None) -> None:
             try:
                 s, _ = await pooled(forecasts, row, question, integer)
             except Exception as exc:  # noqa: BLE001
                 item.setdefault("errors", {})[name] = f"{type(exc).__name__}: {exc}"
                 return
-            item["diffs"][name] = s - base
+            (item["diffs"] if into is None else into)[key or name] = s - base
 
         fed_gapfill = any(m.startswith("gapfill+") for m in shadows)
         if AGENT in shadows:
@@ -223,6 +308,24 @@ async def score_round(project: str, folder: str, records: dict[int, dict[str, li
         if len(members) > 1:
             for m, f in members.items():
                 await diff("solo:agent" if m.startswith("agent/") else f"solo:{m.split('/')[-1]}", [f])
+        cc = sorted(m for m in shadows if is_cc(m))
+        if cc:
+            # Kept apart from "diffs", so the tables above stay as they were.
+            item["cc"], item["cc_after_s"] = {}, {}
+            after = shadow_times(records.get(row["post_id"], {}).get(note, []), row["published_at"])
+            claude = [f for m, f in members.items() if "claude" in m]
+            not_sol = [f for m, f in members.items() if m != SOL]
+            for s in cc:
+                into, f = item["cc"].setdefault(s, {}), shadows[s]
+                item["cc_after_s"][s] = after.get(s)
+                await diff(f"{s} alone", [f], into, "alone")
+                if s.startswith(REFEREE):
+                    continue
+                await diff(f"{s} pool+S", list(members.values()) + [f], into, "pool+S")
+                if claude and len(members) > 1:
+                    await diff(f"{s} claude+S", claude + [f], into, "claude+S")
+                if SOL in members and not_sol:
+                    await diff(f"{s} S for Sol", not_sol + [f], into, "S for Sol")
         out.append(item)
     return out
 
@@ -242,16 +345,168 @@ def report(title: str, items: list[dict], matched_only: bool) -> None:
         print()
 
 
+def with_offline(everything: list[dict], key: str, paths: list[str]) -> tuple[list[tuple[str, float]], int, int]:
+    """(group, diff) rows of `key` from the live rounds plus the offline replays, the live count, and the offline rows dropped as already live."""
+    live_posts = {i["post_id"] for i in everything if "base" in i}
+    rows = [(i["group"], i["diffs"][key]) for i in everything if key in i.get("diffs", {})]
+    n_live, dropped = len(rows), 0
+    for path in paths:
+        with open(path, encoding="utf-8") as fh:
+            for post, (kind, value) in json.load(fh).get(key, {}).items():
+                if int(post) in live_posts:
+                    dropped += 1
+                    continue
+                rows.append((kind, value))
+    return rows, n_live, dropped
+
+
+def cc_names(items: list[dict]) -> list[str]:
+    return sorted({s for i in items if "base" in i for s in i.get("cc", {})})
+
+
+def report_cc(items: list[dict]) -> None:
+    """Each Claude Code shadow minus the published pool, its variants minus their controls, by type, round, best and worst."""
+    used = [i for i in items if "base" in i]
+    names = cc_names(items)
+    print(f"\n===== Claude Code shadows, each minus the published pool: {len(used)} questions scored")
+    if not names:
+        print("  no Claude Code shadow on a scored question")
+        return
+    projects = list(dict.fromkeys(i["project"] for i in used))
+    for s in names:
+        referee = s.startswith(REFEREE)
+        print(f"\n{s}{' (referee, alone in place of the pool)' if referee else ''}")
+        for c in ("alone",) if referee else CC_COMPARISONS:
+            rows = [(i["group"], i["cc"][s][c]) for i in used if c in i.get("cc", {}).get(s, {})]
+            for g, d in by_group(rows):
+                print(f"  {c:26s} {g:24s} {boot(d)}")
+        main_c = "alone" if referee else "pool+S"
+        if len(projects) > 1:
+            for p in projects:
+                d = [i["cc"][s][main_c] for i in used if i["project"] == p and main_c in i.get("cc", {}).get(s, {})]
+                if d:
+                    print(f"  {main_c:26s} {'round ' + p:24s} {boot(d)}")
+        ranked = sorted((i["cc"][s][main_c], i["post_id"], i["type"]) for i in used if main_c in i.get("cc", {}).get(s, {}))
+        if ranked:
+            show = lambda part: ", ".join(f"{p} {k} {v:+.1f}" for v, p, k in part)  # noqa: E731
+            print(f"  {main_c} worst: {show(ranked[:3])}")
+            print(f"  {main_c} best:  {show(ranked[::-1][:3])}")
+    for v in names:
+        c = control_of(v)
+        if c is None:
+            continue
+        print(f"\n{v} minus its control {c} (both alone, questions both answered)")
+        rows = [(i["group"], i["cc"][v]["alone"] - i["cc"][c]["alone"]) for i in used
+                if "alone" in i.get("cc", {}).get(v, {}) and "alone" in i.get("cc", {}).get(c, {})]
+        if not rows:
+            print("  no question with both")
+        for g, d in by_group(rows):
+            print(f"  {'variant-control':26s} {g:24s} {boot(d)}")
+
+
+def minutes(seconds: list[float]) -> str:
+    if not seconds:
+        return "no time recorded"
+    m = np.array(seconds) / 60
+    return f"minutes after the publication: median {np.median(m):.1f}, p90 {np.percentile(m, 90):.1f}, max {m.max():.1f}"
+
+
+def report_coverage(items: list[dict]) -> None:
+    """On how many scored questions each Claude Code shadow answered, and how long after the publication."""
+    used = [i for i in items if "base" in i]
+    print(f"\n===== Claude Code coverage on the {len(used)} scored questions")
+    projects = list(dict.fromkeys(i["project"] for i in used))
+    names = sorted({s for i in used for s in i.get("shadows", []) if is_cc(s)})
+    for s in names:
+        answered = [i for i in used if s in i.get("shadows", [])]
+        per_round = ", ".join(f"{p} {sum(1 for i in answered if i['project'] == p)}/{sum(1 for i in used if i['project'] == p)}"
+                              for p in projects)
+        after = [i["cc_after_s"][s] for i in answered if (i.get("cc_after_s") or {}).get(s) is not None]
+        print(f"  {s}: {len(answered)}/{len(used)} ({per_round}); {minutes(after)}")
+    if not names:
+        print("  no Claude Code shadow on a scored question")
+    seats = [i for i in used if any("claude" in m for m in i["members"])]
+    cc_seat = [i for i in seats if any(is_cc(m) for m in i["members"])]
+    if cc_seat:
+        print(f"  Claude member answered by Claude Code on {len(cc_seat)} of the {len(seats)} questions with a Claude member")
+
+
+def coverage_from_records(records: dict[int, dict[str, list[dict]]], since: float) -> tuple[int, dict[str, list[float]]]:
+    """
+    Straight from the records, resolved or not: per post, the latest run with
+    member records, its last member record standing for the publication, and
+    the Claude Code shadows of that run. Returns (posts forecast since
+    `since`, shadow -> seconds from that publication to its record).
+    """
+    posts, after = 0, {}
+    for runs in records.values():
+        best, best_t = None, None
+        for run, rows in runs.items():
+            times = [r["t"] for r in rows if r["role"] == "member"]
+            if times and (best_t is None or max(times) > best_t):
+                best, best_t = run, max(times)
+        if best is None or best_t < since:
+            continue
+        posts += 1
+        for m, s in shadow_times(runs[best], best_t).items():
+            if is_cc(m):
+                after.setdefault(m, []).append(s)
+    return posts, after
+
+
+def report_rules(items: list[dict], offline: list[str]) -> None:
+    """Every fixed rule: questions so far, the number, and passed, not passed or how many questions are missing."""
+    print("\n===== rules fixed before the results, all question types, all rounds given")
+    lines = []
+    for name, what, key, gain, min_n in RULES:
+        if key in ("agent3", "sup") and offline:
+            rows, _, _ = with_offline(items, key, offline)
+            source = "live+offline"
+        else:
+            rows = [(i["group"], i["diffs"][key]) for i in items if key in i.get("diffs", {})]
+            source = "live"
+        lines.append((name, what, source, [v for _, v in rows], gain, min_n))
+    names = [s for s in cc_names(items) if not s.startswith(REFEREE)]
+    for s in names:
+        d = [i["cc"][s]["pool+S"] for i in items if "base" in i and "pool+S" in i.get("cc", {}).get(s, {})]
+        lines.append((f"{s} pool+S", "the Claude Code shadow joins the pool (2026-11-16)", "live", d, CC_RULE_GAIN, CC_RULE_N))
+    if not names:
+        lines.append(("claudecode pool+S", "a Claude Code shadow joins the pool (2026-11-16)", "live", [], CC_RULE_GAIN, CC_RULE_N))
+    for name, what, source, d, gain, min_n in lines:
+        mean, lo, hi = ci90(d)
+        number = "no question yet" if not d else (f"{mean:+.2f} n=1" if len(d) < 2 else f"{mean:+.2f} [{lo:+.2f}, {hi:+.2f}] n={len(d)}")
+        bar = f"mean >= {gain:+.1f}/q, CI90 lower > 0, n >= {max(min_n, 2)}"
+        print(f"  {name:44s} {source:13s} {number:32s} {bar:42s} {rule_status(d, gain, min_n)}")
+        print(f"    {what}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    parser.add_argument("--round", action="append", required=True, help="project:prepared replay folder, e.g. 33132:logs/replay_r3")
+    parser.add_argument("--round", action="append", default=[], help="project:prepared replay folder, e.g. 33132:logs/replay_r3")
     parser.add_argument("--offline", action="append", default=[], help="panel_score.py output to pool with (agent3 and sup)")
+    parser.add_argument("--rules", action="store_true", help="the Claude Code tables, their coverage and every rule's state")
+    parser.add_argument("--coverage", metavar="DATE", help="Claude Code coverage from the records of questions forecast since DATE (UTC, e.g. 2026-11-16)")
     args = parser.parse_args()
+    if not args.round and not args.coverage:
+        parser.error("give --round (one or more) or --coverage")
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     logging.disable(logging.WARNING)
     os.makedirs(OUT, exist_ok=True)
     records = load_records()
     print(f"Posts with production records: {len(records)}")
+    if args.coverage:
+        since = datetime.fromisoformat(args.coverage)
+        if since.tzinfo is None:
+            since = since.replace(tzinfo=timezone.utc)
+        posts, after = coverage_from_records(records, since.timestamp())
+        print(f"\n===== Claude Code coverage from the records: {posts} posts forecast since {args.coverage}"
+              " (the last member record stands for the publication)")
+        for s in sorted(after):
+            print(f"  {s}: {len(after[s])}/{posts}; {minutes(after[s])}")
+        if not after:
+            print("  no Claude Code shadow recorded on them")
+        if not args.round:
+            return
 
     everything: list[dict] = []
     for spec in args.round:
@@ -279,22 +534,16 @@ def main() -> None:
         report("all live rounds", everything, True)
 
     if args.offline:
-        live_posts = {i["post_id"] for i in everything if "base" in i}
         for key in ("agent3", "sup"):
-            rows = [(i["group"], i["diffs"][key]) for i in everything if key in i.get("diffs", {})]
-            n_live, dropped = len(rows), 0
-            for path in args.offline:
-                with open(path, encoding="utf-8") as fh:
-                    for post, (kind, value) in json.load(fh).get(key, {}).items():
-                        if int(post) in live_posts:
-                            dropped += 1
-                            continue
-                        rows.append((kind, value))
+            rows, n_live, dropped = with_offline(everything, key, args.offline)
             print(f"\n===== {key}: live ({n_live}) + offline time-travel replay ({len(rows) - n_live}; {dropped} already live, not counted twice)")
-            for g in ("all", "all but multiple choice", "binary", "numeric+discrete", "multiple_choice"):
-                d = [v for kind, v in rows if g == "all" or kind == g or (g == "all but multiple choice" and kind != "multiple_choice")]
-                if d:
-                    print(f"{key:28s} {g:24s} {boot(d)}")
+            for g, d in by_group(rows):
+                print(f"{key:28s} {g:24s} {boot(d)}")
+
+    if args.rules or cc_names(everything):
+        report_cc(everything)
+        report_coverage(everything)
+        report_rules(everything, args.offline)
 
 
 if __name__ == "__main__":
