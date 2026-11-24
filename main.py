@@ -195,6 +195,124 @@ def _claude_code(specs: list[str], what: str) -> list:
     return []
 
 
+# Seconds a Claude Code member has for a question, the wait for a free CLI
+# slot and the repair call included, before its fallback model is asked
+# (CC_MEMBER_TIME_LIMIT overrides it). A member answers before the forecast
+# is published, so this is far below the shadows' limits. On 92 replayed
+# questions no call at effort high passed 92 seconds (Fable 5.2: median 18;
+# Opus 5.5 at most 30, Sonnet 5.5 at most 20), while Sonnet 5.5 at effort max
+# passed 230 seconds on 22 of them.
+CC_MEMBER_TIME_LIMIT = 240
+
+
+class _Answered(str):
+    """An answer that also names the forecaster that wrote it (`answered_by`), for a member with a fallback."""
+
+    answered_by: str
+
+    def __new__(cls, text: str, answered_by: str) -> "_Answered":
+        answer = super().__new__(cls, text)
+        answer.answered_by = answered_by
+        return answer
+
+
+class _ClaudeCodeFirst:
+    """
+    An ensemble member on the Claude Code CLI (cc_forecaster.py, the bot
+    maker's Claude subscription) with a fallback model that answers in the
+    same call whenever Claude Code does not: the usage limit, the run's
+    deadline, this member's time limit, an error, or a reply without the
+    answer block. After `limit` seconds the CLI call is stopped and the
+    fallback is asked; the CLI call's own limit ends 10 seconds earlier (the
+    margin cc_forecaster.py keeps before a deadline), so it is stopped and
+    logged as a timeout before that. The answer names which of the two wrote
+    it (_Answered), and bot._ask_models records and pools it under that name.
+    """
+
+    def __init__(self, forecaster, fallback: str, backup, limit: float) -> None:
+        self.model = forecaster.model
+        self.fallback = fallback
+        self._cc, self._backup, self._limit = forecaster, backup, limit
+        forecaster.time_limit_s = max(1, int(limit - 10))
+
+    async def invoke(self, prompt: str) -> str:
+        try:
+            return _Answered(await asyncio.wait_for(self._cc.invoke(prompt), self._limit), self.model)
+        except Exception as exc:  # noqa: BLE001 - whatever stopped Claude Code, the fallback answers
+            reason = str(exc) or f"no answer in {self._limit:.0f}s"
+            logger.warning(f"{self.model} did not answer ({type(exc).__name__}: {reason}); {self.fallback} answers in its place")
+        return _Answered(await self._backup.invoke(prompt), self.fallback)
+
+
+def _claude_code_member(spec: str, members: list[str]):
+    """
+    The member for an ENSEMBLE_MODELS entry
+    "claudecode/<model>@<effort>|<fallback model>": Claude Code first, the
+    fallback when it does not answer (_ClaudeCodeFirst). Without the CLI or
+    its credential the fallback takes the seat under its own name, with one
+    log line. An entry that could not run as written raises ValueError (_seat
+    turns it into a warning): one without a fallback, the agent form, a
+    Claude Code member or a fallback named twice in the list, or a fallback
+    that is RESERVE_MODEL.
+    """
+    primary, _, fallback = (part.strip() for part in spec.partition("|"))
+    if not primary.startswith("claudecode/") or not fallback or "|" in fallback or fallback.startswith("claudecode"):
+        raise ValueError(
+            f"ENSEMBLE_MODELS: {spec!r} is not a Claude Code member. Write it as "
+            '"claudecode/<model>@<effort>|<fallback model>": the fallback, a model on an API, answers whenever '
+            "Claude Code does not. The agent form (claudecode-agent/) goes in AGENT_MEMBER_SPEC."
+        )
+    named = [part.strip() for member in members for part in member.split("|")]
+    if named.count(primary) > 1:
+        raise ValueError(f"ENSEMBLE_MODELS: {primary} is named twice: the pool and the records would hold two of "
+                         "its answers under one name.")
+    if named.count(fallback) > 1 or fallback == os.getenv("RESERVE_MODEL", "").strip():
+        raise ValueError(
+            f"ENSEMBLE_MODELS: the fallback {fallback!r} of {primary} is "
+            f"{'named twice' if named.count(fallback) > 1 else 'also RESERVE_MODEL'}. When Claude Code does not "
+            "answer, the pool and the records would hold two answers under one name."
+        )
+    backup, limit = _member(fallback), None
+    what = f"member {primary} (its fallback {fallback} takes the seat)"
+    try:
+        limit = float((os.getenv("CC_MEMBER_TIME_LIMIT") or "").strip() or CC_MEMBER_TIME_LIMIT)
+        if not 0 < limit < 86400:  # also nan and inf, which int() cannot take
+            raise ValueError(f"CC_MEMBER_TIME_LIMIT is not a number of seconds: {limit}")
+    except ValueError as exc:
+        limit = None
+        logger.warning(f"Claude Code {what} skipped: ValueError: {exc}")
+    forecaster = next(iter(_claude_code([primary], what)), None) if limit is not None else None
+    if forecaster is None:
+        return backup
+    logger.info(f"Claude Code member {forecaster.model}: {limit:.0f} s per question, then {fallback} answers in its place")
+    return _ClaudeCodeFirst(forecaster, fallback, backup, limit)
+
+
+def _seat(entry: str, members: list[str], seated: set[str]):
+    """
+    The ensemble member for one ENSEMBLE_MODELS entry, or None. A Claude Code
+    entry that cannot run as written (_claude_code_member) never stops the
+    run: one warning, and its fallback model takes the seat alone. No one
+    takes it when the fallback is unusable, sits already as another entry or
+    as the fallback of an earlier one (`seated`), or is RESERVE_MODEL, which
+    keeps its own role: each model answers once per question.
+    """
+    if not entry.startswith(("claudecode/", "claudecode-agent/")):
+        return _member(entry)
+    try:
+        return _claude_code_member(entry, members)
+    except Exception as exc:  # noqa: BLE001 - a configuration mistake must not stop the forecasts
+        fallback = entry.partition("|")[2].strip()
+        usable = (bool(fallback) and "|" not in fallback and not fallback.startswith("claudecode")
+                  and fallback not in members and fallback not in seated
+                  and fallback != os.getenv("RESERVE_MODEL", "").strip())
+        logger.warning(f"{exc} This run seats {fallback if usable else 'no one'} in its place.")
+        if not usable:
+            return None
+        seated.add(fallback)
+        return _member(fallback)
+
+
 TOURNAMENT_URLS = {
     "tournament": "https://www.metaculus.com/tournament/fall-futureeval-2026/",
     "minibench": "https://www.metaculus.com/aib/minibench",
@@ -220,13 +338,22 @@ def build_bot(publish: bool, samples: int) -> ForecasterBot:
         "summarizer": GeneralLlm(model=PARSER_MODEL, temperature=0.0, timeout=60),
     }
     # ENSEMBLE=0 falls back to the single default model; ENSEMBLE_MODELS
-    # overrides the member list.
+    # overrides the member list. An entry
+    # "claudecode/<model>@<effort>|<fallback model>" is a member on the
+    # Claude Code CLI whose fallback answers when it does not
+    # (_claude_code_member, _seat).
     _override = os.getenv("ENSEMBLE_MODELS", "").strip()
     _members = [m.strip() for m in _override.split(",") if m.strip()] if _override else _ENSEMBLE
+    _seated: set[str] = set()
     ensemble = (
         []
         if os.getenv("ENSEMBLE", "1") == "0"
-        else [_member(m) for m in _members]
+        else [seat for seat in (_seat(m, _members, _seated) for m in _members) if seat is not None]
+    )
+    # A Claude Code entry that seats no one (_seat) leaves the agent its seat
+    # even when it was the only entry.
+    seats_on = bool(ensemble) or (
+        os.getenv("ENSEMBLE", "1") != "0" and any(m.startswith(("claudecode/", "claudecode-agent/")) for m in _members)
     )
     # AGENT_MEMBER=1 makes the agentic forecaster (agent_forecaster.py) a
     # member, run with the others before publishing and pooled like them,
@@ -244,7 +371,7 @@ def build_bot(publish: bool, samples: int) -> ForecasterBot:
     # recorded as a shadow, and pooled only when fewer than two members answer
     # (the agent needs the Anthropic credit and can time out).
     agent_member = None
-    if ensemble and os.getenv("AGENT_MEMBER", "").strip() == "1":
+    if seats_on and os.getenv("AGENT_MEMBER", "").strip() == "1":
         agent_spec = os.getenv("AGENT_MEMBER_SPEC", "").strip() or "agent/claude-sonnet-5-5@xhigh"
         if agent_spec.startswith("claudecode-agent/"):
             # The agent's seat on the Claude Code CLI and the Claude
@@ -294,12 +421,28 @@ def build_bot(publish: bool, samples: int) -> ForecasterBot:
         shadows.append((spec, _thinker(model.strip(), 0.3, 120, effort=effort.strip() or None)))
     # Shadows on the Claude Code CLI run last, after the deferred ones
     # (bot.run_claude_code_shadows), under the name the forecaster gives
-    # itself. One that is already the agent member is not run twice.
-    cc_shadows = [
-        (forecaster.model, forecaster)
-        for forecaster in (_claude_code(cc_specs, "shadows") if cc_specs else [])
-        if agent_member is None or forecaster.model != agent_member.model
-    ]
+    # itself. One that is already a member is not run twice.
+    # "<spec>+<variant>" is that forecaster asked with the prompt changed by
+    # prompt_variants.py, recorded under the name with the variant.
+    variants = {}
+    if any("+" in spec for spec in cc_specs):
+        try:
+            import prompt_variants
+
+            variants = prompt_variants.VARIANTS
+        except Exception as exc:  # noqa: BLE001 - a shadow must never stop a run
+            logger.warning(f"prompt_variants.py did not load: {type(exc).__name__}: {exc}")
+    seated = {member.model for member in ensemble}
+    cc_shadows = []
+    built = _claude_code([spec.partition("+")[0] for spec in cc_specs], "shadows") if cc_specs else []
+    for spec, forecaster in zip(cc_specs, built):
+        variant = spec.partition("+")[2].strip()
+        if variant and variant not in variants:
+            logger.warning(f"Claude Code shadow {spec} skipped: no prompt variant named {variant!r} in prompt_variants.py")
+        elif variant:
+            cc_shadows.append((f"{forecaster.model}+{variant}", forecaster))
+        elif forecaster.model not in seated:
+            cc_shadows.append((forecaster.model, forecaster))
 
     # Evidence packet (evidence_packet.py): one call per question at low
     # effort that sorts and dates the research. Off since 2026-10-21;

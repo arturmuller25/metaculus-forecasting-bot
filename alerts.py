@@ -13,6 +13,7 @@ and the coverage check's output, and opens one issue per problem found:
 - a tournament mode failed on every question it tried in this run;
 - the agentic forecaster failed as a member at least 5 times in this run;
 - the Claude Code forecasters reached the Claude subscription's usage limit;
+- the Claude Code CLI rejected its credential (a revoked or invalid token);
 - questions closed without a forecast (coverage_check.py).
 
 An issue that is already open for the same problem is left alone, so a problem
@@ -40,6 +41,8 @@ FAILED = re.compile(r"Failed or unparsable model answers this run: (.+)")
 # bot.run_claude_code_shadows and cc_forecaster.py log the first form; a
 # Claude Code forecaster failing as a member logs the exception's name.
 CC_LIMIT = re.compile(r"\| WARNING \| (?:Claude Code usage limit|.*\bClaudeCodeLimit\b)")
+# cc_forecaster.py logs this once per process when the CLI rejects its credential.
+CC_CREDENTIAL = re.compile(r"\| WARNING \| Claude Code credential rejected")
 
 
 def read(path: str) -> list[str]:
@@ -121,8 +124,30 @@ def find_alerts(run: list[str], coverage: list[str], key_remaining: float | None
             "takes its seat). The run's log has the CLI's message, which names the limit (session, week or model) "
             "and when it resets. If that line says requests are billing to usage credits, calls beyond the plan "
             "were charged: check Settings > Usage on claude.ai.\n\n"
+            "The later iterations of the same run make no Claude Code call until the reset (logs/cc_hold.json), but "
+            "the next run tries again once: to keep every run off until the reset, set the repository variable "
+            "CC_NOT_BEFORE to that time.\n\n"
             "Nothing else to fix unless it repeats: then lower CC_MAX_PARALLEL or drop a Claude Code entry from "
             "SHADOW_MODELS. Close this issue afterwards.",
+        ))
+
+    rejected = [line for line in run if CC_CREDENTIAL.search(line)]
+    if rejected:
+        alerts.append((
+            "Claude Code credential rejected",
+            f"The Claude Code CLI rejected its credential, the token of the Claude subscription ({len(rejected)} log "
+            "line(s) in this run; the run's log has the CLI's message).\n\n"
+            "While it lasts: no Claude Code call is made for the rest of the run (logs/cc_hold.json holds the later "
+            "iterations), the Claude Code shadows record nothing, a Claude Code member is replaced by its fallback "
+            "model, and an agent member on Claude Code by the reserve model. The published forecasts go on.\n\n"
+            "Fix, one of the two:\n"
+            "- On a machine logged in to the Claude subscription, run `claude setup-token` and save the new token as "
+            "the repository secret CLAUDE_CODE_OAUTH_TOKEN (Settings > Secrets and variables > Actions).\n"
+            "- Or stop using Claude Code on the runner: take the claudecode entries out of the repository variables "
+            "SHADOW_MODELS and ENSEMBLE_MODELS (a member `claudecode/...|<fallback model>` becomes its fallback model "
+            "alone; an AGENT_MEMBER_SPEC on claudecode-agent/ goes back to agent/), or delete the secret, which skips "
+            "them all.\n\n"
+            "Close this issue afterwards.",
         ))
 
     missed = [line.split("::")[-1].strip() for line in coverage if "without a forecast" in line]

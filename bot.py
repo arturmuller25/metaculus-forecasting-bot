@@ -363,6 +363,9 @@ class ForecasterBot(ForecastBot):
         # once (run_claude_code_shadows).
         self._cc_shadows = list(cc_shadows or [])
         self._cc_queue: list[tuple] = []
+        # The research behind each queued question's prompt, by question id,
+        # for the shadows named "<spec>+<variant>" (prompt_variants.py).
+        self._cc_research: dict[Any, str] = {}
         if self._cc_shadows:
             logger.info(f"Claude Code shadows (recorded only, run last): {', '.join(n for n, _ in self._cc_shadows)}")
         # Failed or unparsable answers per model in this run, reported by main.py.
@@ -709,13 +712,15 @@ class ForecasterBot(ForecastBot):
         question: MetaculusQuestion,
         prompt: str,
         parse: Callable[[str], Awaitable[Any]],
+        research: str = "",
     ) -> list[tuple[str, Any, str]]:
         """
         Sends the same prompt to every ensemble model (or to the default model
         when the ensemble is off) and parses each answer. Returns (model,
         prediction, reasoning) for the models that succeeded, so one failure
         does not sink the question. Shadow models run in parallel and are only
-        recorded.
+        recorded. `research` is the research text inside the prompt, kept for
+        the Claude Code shadows that change the prompt (prompt_variants.py).
 
         The ensemble mixes model families on purpose: in a controlled test on
         202 tournament questions (Schneider and Schramm, 2025), different
@@ -731,9 +736,13 @@ class ForecasterBot(ForecastBot):
 
         async def ask(name: str, llm: GeneralLlm, role: str) -> tuple[str, Any, str] | None:
             try:
+                answer = await llm.invoke(prompt)
+                # A member with a fallback model (main._ClaudeCodeFirst) says
+                # which of the two answered: recorded and pooled under it.
+                name = getattr(answer, "answered_by", name)
                 # Metaculus rejects a comment with a null character (three
                 # numeric questions lost their comment that way in 2026-10/11).
-                text = (await llm.invoke(prompt)).replace("\x00", "")
+                text = answer.replace("\x00", "")
                 prediction = await parse(text)
             except Exception as exc:
                 logger.warning(f"{name} ({role}) failed: {type(exc).__name__}: {exc}")
@@ -752,6 +761,8 @@ class ForecasterBot(ForecastBot):
             (question, name, llm, prompt, parse) for name, llm in self._shadows if getattr(llm, "deferred", False)
         ]
         self._cc_queue += [(question, name, llm, prompt, parse) for name, llm in self._cc_shadows]
+        if self._cc_shadows:
+            self._cc_research[question.id_of_question] = research
         reserve = [self._reserve] if self._reserve is not None else []
         results = await asyncio.gather(
             *(ask(name, llm, "member") for name, llm in members),
@@ -846,34 +857,70 @@ class ForecasterBot(ForecastBot):
         shadow and never pooled. A call the module skipped for lack of time
         is not a model failure, and once the subscription's usage limit is
         reached the calls that have not started their CLI process are
-        skipped (the ones already running end by themselves); these are
-        samples, not coverage. The module's call log (logs/cc_calls.jsonl)
-        gets each question's post id and question id, to match a recorded
-        forecast with the time limit its call ran with.
+        skipped (the ones already running end by themselves): every one of
+        them, or the ones on a single model family when the limit names it
+        (ClaudeCodeLimit.family); a rejected credential stops all of them,
+        without a failure either. These are samples, not coverage. A shadow
+        named "<spec>+<variant>" is asked with the prompt as that variant of
+        prompt_variants.py changes it, and left out, without a failure, on a
+        question where the variant has nothing to change. The module's call
+        log (logs/cc_calls.jsonl) gets each question's post id and question
+        id, to match a recorded forecast with the time limit its call ran
+        with.
         """
         pending, self._cc_queue = self._cc_queue, []
+        research_of, self._cc_research = self._cc_research, {}
         if not pending:
             return
         import cc_forecaster  # main.py loaded it when a spec asked for it
 
-        uncounted = (cc_forecaster.ClaudeCodeLimit, cc_forecaster.ClaudeCodeSkipped)
-        count = {"recorded": 0, "failed": 0, "no time": 0, "usage limit": 0}
+        variants: dict = {}
+        if any("+" in item[1] for item in pending):
+            import prompt_variants  # main.py loaded it when a shadow named a variant
+
+            variants = prompt_variants.VARIANTS
+        # A rejected credential (cc_forecaster.ClaudeCodeCredential) stops
+        # every call of the run and is not a failure of the model either.
+        credential = tuple(c for c in (getattr(cc_forecaster, "ClaudeCodeCredential", None),) if c is not None)
+        uncounted = (cc_forecaster.ClaudeCodeLimit, cc_forecaster.ClaudeCodeSkipped) + credential
+        count = {"recorded": 0, "failed": 0, "no time": 0, "usage limit": 0, "unchanged": 0, "credential": 0}
+        # The model families a usage limit holds; None stands for every family.
+        held: set = set()
 
         async def one(question: MetaculusQuestion, name: str, llm: Any, prompt: str, parse: Callable) -> None:
-            if count["usage limit"]:
+            if None in held or getattr(llm, "family", None) in held:
                 count["usage limit"] += 1
                 return
+            variant = name.partition("+")[2]
+            if variant:
+                try:
+                    # In a thread: a variant may read the web for its block.
+                    prompt = await asyncio.to_thread(
+                        variants[variant], prompt, question, research_of.get(question.id_of_question, ""))
+                except Exception as exc:  # noqa: BLE001 - a variant that fails is a failed answer
+                    logger.warning(f"{name} (shadow): prompt variant failed on {question.page_url}: {type(exc).__name__}: {exc}")
+                    self.model_failures[f"{name} (shadow)"] = self.model_failures.get(f"{name} (shadow)", 0) + 1
+                    count["failed"] += 1
+                    return
+                if prompt is None:
+                    count["unchanged"] += 1
+                    return
             # Each of these runs as a task of its own, so the tag is this call's alone.
             cc_forecaster.CALL_TAG.set({"post_id": question.id_of_post, "question_id": question.id_of_question})
             try:
                 answer = await self._shadow_answer(question, name, llm, prompt, parse, reraise=uncounted)
             except cc_forecaster.ClaudeCodeLimit as exc:
-                if not count["usage limit"]:
+                family = getattr(exc, "family", None)
+                if family not in held and None not in held:
                     # alerts.py opens an issue on this line.
-                    logger.warning(f"Claude Code usage limit reached: {exc}. The Claude Code shadows still waiting are skipped")
+                    logger.warning(f"Claude Code usage limit reached: {exc}. The Claude Code shadows "
+                                   + (f"on {family.capitalize()} models " if family else "") + "still waiting are skipped")
+                held.add(family)
                 count["usage limit"] += 1
             except cc_forecaster.ClaudeCodeSkipped:
                 count["no time"] += 1
+            except credential:
+                count["credential"] += 1  # cc_forecaster.py logged it once, for alerts.py
             else:
                 count["recorded" if answer is not None else "failed"] += 1
 
@@ -884,6 +931,8 @@ class ForecasterBot(ForecastBot):
             f"Claude Code shadows: {len(pending)} queued, {count['recorded']} recorded, {count['failed']} failed, "
             f"{count['no time']} skipped for lack of time before the run's deadline, "
             f"{count['usage limit']} stopped by the usage limit"
+            + (f", {count['unchanged']} left out by a prompt variant with nothing to change" if variants else "")
+            + (f", {count['credential']} stopped by a rejected credential" if count["credential"] else "")
         )
 
     async def _run_panel(self, panel: tuple, agent_answers: list[tuple[str, Any, str]]) -> None:
@@ -1013,7 +1062,7 @@ class ForecasterBot(ForecastBot):
             """
         )
 
-        answers = await self._ask_models(question, prompt, self._parse_binary)
+        answers = await self._ask_models(question, prompt, self._parse_binary, research)
         if len(answers) == 1:
             _, value, text = answers[0]
             logger.info(f"Forecast {question.page_url}: {value}")
@@ -1137,7 +1186,7 @@ class ForecasterBot(ForecastBot):
                     raise error
             return aligned
 
-        answers = await self._ask_models(question, prompt, parse)
+        answers = await self._ask_models(question, prompt, parse, research)
         if len(answers) == 1:
             _, predicted, text = answers[0]
             logger.info(f"Forecast {question.page_url}: {predicted}")
@@ -1298,7 +1347,7 @@ class ForecasterBot(ForecastBot):
                 )
             return distribution
 
-        answers = await self._ask_models(question, prompt, parse)
+        answers = await self._ask_models(question, prompt, parse, research)
         if len(answers) == 1:
             _, prediction, text = answers[0]
             prediction, note = await self._blend_market_baseline(question, prediction)

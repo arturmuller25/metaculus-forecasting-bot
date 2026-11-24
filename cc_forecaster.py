@@ -28,7 +28,16 @@ Interface:
   From then on every call of this process that has not started its CLI yet,
   one waiting for a free slot included, raises it at once; the calls already
   running end by themselves. The subscription is shared with the bot maker's
-  own work.
+  own work. A limit that names a model family ("You've hit your Fable
+  limit") holds the calls on that family alone, and the exception's `family`
+  names it; any other limit holds every call (`family` is None).
+- ClaudeCodeCredential: the CLI said its credential was rejected (a revoked
+  or invalid token: at once when it says so for sure, at the second call
+  for a weaker sign). Every later call of this process raises it at once.
+- The run's hold file (HOLD_FILE): a usage limit, billing to usage credits
+  or a rejected credential also holds the calls of the later processes of
+  the same run, until the reset time when the CLI gives one. available()
+  reads it once per process, before the first call.
 - CALL_TAG: a context variable the caller may set around invoke() with the
   question's post id and question id, which then go to the call's log line.
 - shutdown() kills every CLI process tree still alive. It runs at
@@ -145,10 +154,25 @@ MAX_SEARCHES = 8
 MAX_FETCHES = 12
 AGENT_MAX_TURNS = MAX_SEARCHES + MAX_FETCHES + 6
 
+# The file through which a usage limit, billing to usage credits or a
+# rejected credential holds the Claude Code calls of the later processes of
+# the same run: the workflow starts main.py again every 20 minutes in the
+# same checkout, and on 2026-11-17 three iterations in a row called again
+# after the CLI had said that requests were billing to usage credits (7
+# calls charged). CC_HOLD_FILE overrides the path. Without it the file is
+# kept on GitHub Actions only, where every run starts from a new checkout;
+# elsewhere the hold lasts for the process.
+HOLD_FILE = os.path.join("logs", "cc_hold.json")
+# A hold without a reset time lasts for the rest of the run: GitHub stops a
+# job after 6 hours.
+HOLD_MAX_S = 6 * 3600
+
 # CLI processes running at once, across every instance (CC_MAX_PARALLEL).
 # The subscription publishes no rule for parallel runs.
 MAX_PARALLEL = int((os.getenv("CC_MAX_PARALLEL") or "").strip() or 4)
 _SLOTS = threading.BoundedSemaphore(max(1, MAX_PARALLEL))
+# Held by the first CLI run of the process until it ends (_run_cli).
+_FIRST_RUN = threading.Lock()
 
 # The only inherited variables the CLI process gets, compared in upper case.
 _ENV_ALLOW = frozenset({
@@ -287,6 +311,26 @@ _REPAIR_REPLY_CHARS = 40000
 # "... Opus limit ...", "... Sonnet limit ...", "... monthly spend limit ...",
 # "... individual usage limit".
 _LIMIT_RE = re.compile(r"hit your\b[^\n]{0,60}\blimit\b|\busage limit\b|\bspend limit\b", re.IGNORECASE)
+# The model families with a limit of their own. The message names the family
+# and the other families keep answering: "You've hit your Fable limit · resets
+# Nov 16, 7pm (America/Sao_Paulo). Switch to another model, or ..." (seen
+# 2026-11-15, with a rejected rate-limit event whose type named no family).
+_FAMILIES = ("opus", "sonnet", "haiku", "fable")
+_FAMILY_LIMIT_RE = re.compile(r"hit your\b([^\n]{0,60}?)\blimit\b", re.IGNORECASE)
+# The CLI's own text when the plan's allowance ran out and the calls go on,
+# charged to the account's usage credits.
+_OVERAGE_RE = re.compile(r"billing to usage credits", re.IGNORECASE)
+# The CLI's messages when its credential is refused. These say so for sure:
+# "Failed to authenticate: OAuth token revoked", with status 401, on the
+# runner from 2026-11-19, and the API's "OAuth token has expired" for an
+# expired token. A status 401 or "Invalid API key" alone (also the CLI's
+# message for a bad external API key, which this module never passes) holds
+# the calls when a second call of the process gets one before any call
+# answers (_AUTH_STRIKES).
+_AUTH_SURE_RE = re.compile(r"Failed to authenticate|OAuth token (?:has (?:been )?)?(?:revoked|expired)", re.IGNORECASE)
+_AUTH_RE = re.compile(_AUTH_SURE_RE.pattern + r"|Invalid API key", re.IGNORECASE)
+_AUTH_STRIKES = 2
+_OVERAGE = "the plan's allowance ran out and requests are billing to usage credits"
 
 _USAGE_LINE_RE = re.compile(r"^(Current [^:\n]+):\s*(\d+(?:\.\d+)?)% used(?:\s*·\s*resets\s+(.+?))?\s*$", re.MULTILINE)
 
@@ -296,20 +340,50 @@ _EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+(?:@|%40)[A-Za-z0-9-]+(?:\.[A-Za-z0-9-
 _VERSION_RE = re.compile(r"(\d+)\.(\d+)\.(\d+)")
 
 
+def _family(model: str) -> str:
+    """The family of a Claude model id: "fable" for claude-fable-5-2."""
+    parts = model.lower().split("-")
+    return next((p for p in parts if p in _FAMILIES), parts[1] if len(parts) > 1 else parts[0])
+
+
+def _limit_family(message: str) -> str | None:
+    """The model family a limit message names ("hit your Fable limit"), or None when the limit is a general one."""
+    m = _FAMILY_LIMIT_RE.search(message)
+    words = re.findall(r"[a-z]+", m.group(1).lower()) if m else []
+    return next((w for w in words if w in _FAMILIES), None)
+
+
 class ClaudeCodeLimit(RuntimeError):
-    """The subscription's usage limit was reached: every later call of this process raises this at once."""
+    """
+    The subscription's usage limit was reached: every later call it holds
+    raises this at once. `family` is the model family the limit names
+    ("fable"), whose calls alone are held, or None when every call is.
+    """
+
+    def __init__(self, message: str = "") -> None:
+        super().__init__(message)
+        self.family = _limit_family(str(message))
 
 
 class ClaudeCodeSkipped(RuntimeError):
     """No CLI call was made: too little time before the deadline, or the forecaster was shut down."""
 
 
-# The usage limit seen by any instance in this process. It holds until the
-# process ends: one run of the bot is shorter than any reset.
-_LIMIT: dict[str, Any] = {"message": None}
+class ClaudeCodeCredential(RuntimeError):
+    """The CLI's credential was rejected (a revoked or invalid token): every later call of this process raises this at once."""
+
+
+# The usage limits seen by any instance in this process: "message" is a
+# general one (session, week, spend, a rejection that names no family) and
+# holds every call; "families" has the message of each limit on one model
+# family, which holds the calls on that family. They hold until the process
+# ends: one run of the bot is shorter than any reset.
+_LIMIT: dict[str, Any] = {"message": None, "families": {}}
 _LIMIT_LOCK = threading.Lock()
 # Why _run_cli did not start a call that was waiting for a slot when the limit came.
 _LIMIT_SKIP = "the usage limit was reached while this call waited"
+# The same for a credential rejected while the call waited.
+_CREDENTIAL_SKIP = "the credential was rejected while this call waited"
 
 # What a call is for: the caller may set {"post_id": ..., "question_id": ...}
 # around invoke() (bot.run_claude_code_shadows does), and both go to that
@@ -318,8 +392,12 @@ _LIMIT_SKIP = "the usage limit was reached while this call waited"
 CALL_TAG: contextvars.ContextVar[dict | None] = contextvars.ContextVar("cc_call_tag", default=None)
 
 # Process-wide state: the deadline of set_deadline, whether shutdown() ran,
-# whether the signal handlers are installed.
-_STATE: dict[str, Any] = {"deadline": None, "stopped": False, "signals": False}
+# whether the signal handlers are installed, the message of a rejected
+# credential, the calls refused with a weaker sign of it since the last answer,
+# what the run's hold file said (None until it is read), and whether a CLI run
+# of this process has ended, which lets the runs start together (_run_cli).
+_STATE: dict[str, Any] = {"deadline": None, "stopped": False, "signals": False, "credential": None, "strikes": 0,
+                          "hold": None, "judged": False}
 
 # The CLI processes still running, each with its working folder.
 _LIVE: dict[subprocess.Popen, str] = {}
@@ -330,27 +408,145 @@ _PREVIOUS_HANDLERS: dict[int, Any] = {}
 _PROBES: dict[tuple, tuple[bool, str]] = {}
 
 
-def limit_reached() -> str | None:
-    """The usage-limit message in force in this process, or None."""
-    return _LIMIT["message"]
+def limit_reached(model: str | None = None) -> str | None:
+    """
+    The usage-limit message that holds every call of this process, or None.
+    With a model id, also the message of a limit on that model's family.
+    """
+    if _LIMIT["message"] is not None or model is None:
+        return _LIMIT["message"]
+    return _LIMIT["families"].get(_family(model))
 
 
 def reset_limit() -> None:
+    """Forgets the usage limits and the rejected credential of this process (for the tests)."""
     _LIMIT["message"] = None
+    _LIMIT["families"].clear()
+    _STATE["credential"] = None
+    _STATE["strikes"] = 0
 
 
-def _latch_limit(message: str, resets_at: Any = None) -> None:
-    """Records the limit for the rest of the process and logs it, once: the first message holds."""
+def _hold_path() -> str | None:
+    """The run's hold file (HOLD_FILE), or None when there is none."""
+    path = (os.getenv("CC_HOLD_FILE") or "").strip()
+    if path:
+        return path
+    return HOLD_FILE if os.getenv("GITHUB_ACTIONS") == "true" else None
+
+
+def _write_hold(scopes: list[str], reason: str, until: float | None) -> None:
+    """
+    Adds a hold to the run's hold file for each scope, "all" or a model
+    family, until the reset time when there is one. Never raises.
+    """
+    path = _hold_path()
+    if not path:
+        return
+    try:
+        try:
+            with open(path, encoding="utf-8") as fh:
+                held = json.load(fh)
+        except (OSError, ValueError):
+            held = {}
+        held = held if isinstance(held, dict) else {}
+        for scope in scopes:
+            held[scope] = {"reason": _scrub(reason)[:300], "until": until, "since": time.time()}
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        with open(path + ".tmp", "w", encoding="utf-8") as fh:
+            json.dump(held, fh, ensure_ascii=False)
+        os.replace(path + ".tmp", path)
+    except Exception as exc:  # noqa: BLE001 - the process still holds the calls
+        logger.warning(f"Could not write the Claude Code hold file {path}: {type(exc).__name__}: {exc}")
+
+
+def _run_hold() -> str:
+    """
+    Why the run's hold file stops every Claude Code call of this process, or
+    "" when it does not. Read once per process, by available(); a later
+    write by this process does not change the answer, since the process
+    holds its own calls already. A hold on one model family is latched like
+    a limit the CLI reported, with one log line. A hold ends at its reset
+    time, or HOLD_MAX_S after it was written when it has none. A file that
+    cannot be read holds every call.
+    """
+    if _STATE["hold"] is not None:
+        return _STATE["hold"]
+    path, verdict = _hold_path(), ""
+    if path and os.path.exists(path):
+        try:
+            with open(path, encoding="utf-8") as fh:
+                held = json.load(fh)
+            items = list(held.items())
+        except (OSError, ValueError, AttributeError) as exc:
+            items, verdict = [], f"{path} could not be read ({type(exc).__name__}), so no call is made in this process"
+        now = time.time()
+        for scope, entry in items:
+            try:
+                since, until, reason = float(entry["since"]), entry.get("until"), str(entry.get("reason"))
+                until = float(until) if until is not None and float(until) > since else None
+            except (TypeError, ValueError, KeyError, AttributeError):
+                since, until, reason = now, None, f"an entry of {path} could not be read"
+            if now >= (until or since + HOLD_MAX_S):
+                continue
+            when = f"until {datetime.fromtimestamp(until, timezone.utc):%Y-%m-%d %H:%M} UTC" if until else "for the rest of this run"
+            if scope in _FAMILIES and _limit_family(reason) is not None:
+                with _LIMIT_LOCK:
+                    _LIMIT["families"].setdefault(scope, reason)
+                logger.warning(f"Claude Code calls on {scope.capitalize()} models held {when} by {path}, "
+                               f"written by an earlier iteration of this run: {reason}")
+            else:
+                verdict = f"held {when} by {path}, written by an earlier iteration of this run: {reason}"
+    _STATE["hold"] = verdict
+    return verdict
+
+
+def _held_credential() -> str:
+    return f"the Claude Code credential was rejected earlier in this run: {_STATE['credential']}"
+
+
+def _latch_credential(message: str) -> None:
+    """Holds every call of the process and of the rest of the run, and logs it, once: the first message holds."""
+    with _LIMIT_LOCK:
+        if _STATE["credential"] is not None:
+            return
+        _STATE["credential"] = message
+        _write_hold(["all"], f"the Claude Code credential was rejected: {message}", None)
+    # alerts.py opens an issue on this line.
+    logger.warning(f"Claude Code credential rejected: {message}. No more Claude Code calls in this run. A new token "
+                   "(`claude setup-token`) goes in the secret CLAUDE_CODE_OAUTH_TOKEN, or the claudecode entries "
+                   "come out of SHADOW_MODELS and ENSEMBLE_MODELS")
+
+
+def _latch_limit(message: str, resets_at: Any = None, model: str | None = None) -> None:
+    """
+    Records the limit for the rest of the process and logs it, once: the
+    first message holds. A message that names a model family holds that
+    family alone, and the family of the call that got it (`model`) when that
+    is another one, since that call cannot run either. Any other message
+    holds every call. The run's hold file gets the same hold, silently.
+    """
     try:
         resets_at = float(resets_at) if resets_at else None
     except (TypeError, ValueError):
         resets_at = None
+    named = _limit_family(message)
+    scope = ""
     with _LIMIT_LOCK:
         if _LIMIT["message"] is not None:
             return  # latched and logged already, by this call's worker thread or by another call
-        _LIMIT["message"] = message
+        if named is None:
+            _LIMIT["message"] = message
+            _write_hold(["all"], message, resets_at)
+        else:
+            new = [f for f in dict.fromkeys((named, _family(model) if model else named)) if f not in _LIMIT["families"]]
+            if not new:
+                return
+            for family in new:
+                _LIMIT["families"][family] = message
+            _write_hold(new, message, resets_at)
+            scope = f" on {' and '.join(f.capitalize() for f in new)} models"
     # alerts.py opens an issue on this line.
-    logger.warning(f"Claude Code usage limit: {message}. No more Claude Code calls in this process"
+    logger.warning(f"Claude Code usage limit: {message}. No more Claude Code calls{scope} in this process"
                    + (f" (the CLI gives {datetime.fromtimestamp(resets_at, timezone.utc):%Y-%m-%d %H:%M} UTC as the reset)"
                       if resets_at else ""))
 
@@ -583,8 +779,11 @@ def available(claude_bin: str | None = None) -> tuple[bool, str]:
     CC_NOT_BEFORE (an ISO time, UTC when it has no offset) holds every call
     until then: the subscription is the bot maker's own and its weekly limit
     is shared with his work, so the calls can wait for the limit's reset.
+    The run's hold file (HOLD_FILE) holds them the same way after an earlier
+    process of the run met a usage limit, billing to usage credits or a
+    rejected credential.
     """
-    held = _not_before()
+    held = _not_before() or _run_hold()
     if held:
         return False, held
     try:
@@ -662,10 +861,12 @@ def _run_cli(argv: list[str], data: bytes, env: dict[str, str], timeout: float, 
     the working directory, the prompt on standard input, the process tree
     killed at the time limit or when the caller was cancelled, the folder
     removed at the end. Nothing is started ("skipped" says why) when the
-    caller was cancelled, shutdown() ran, the usage limit was reached, or
-    fewer than min_seconds are left before the deadline; the wait for a free
-    slot counts. Returns the exit code, both outputs, whether it timed out,
-    the time limit used and how many files the run left in its folder.
+    caller was cancelled, shutdown() ran, the usage limit was reached (a
+    general one, or one on the family of state["model"]), or fewer than
+    min_seconds are left before the deadline; the wait for a free slot
+    counts. Until one run of the process has ended, runs start one at a
+    time. Returns the exit code, both outputs, whether it timed out, the
+    time limit used and how many files the run left in its folder.
     """
     out: dict[str, Any] = {"code": None, "stdout": b"", "stderr": b"", "timed_out": False, "skipped": None,
                            "cwd": "", "left": 0, "limit": timeout, "seconds": 0.0}
@@ -675,7 +876,9 @@ def _run_cli(argv: list[str], data: bytes, env: dict[str, str], timeout: float, 
             return "cancelled by the caller"
         if _STATE["stopped"]:
             return "the forecaster was shut down"
-        if _LIMIT["message"] is not None:
+        if _STATE["credential"] is not None:
+            return _CREDENTIAL_SKIP
+        if limit_reached(state.get("model")) is not None:
             return _LIMIT_SKIP
         if deadline is not None and deadline - time.time() < min_seconds:
             return (f"{max(0.0, deadline - time.time()):.0f}s left before the deadline, "
@@ -688,7 +891,18 @@ def _run_cli(argv: list[str], data: bytes, env: dict[str, str], timeout: float, 
             return out
         if _SLOTS.acquire(timeout=0.5):
             break
+    first = False
     try:
+        # Until one run of this process has ended, one run at a time: when the
+        # plan's allowance has run out, that run's rate-limit event holds the
+        # others before they start (a new run of the workflow starts without
+        # the hold file, and every call queued at once would be billed).
+        while not _STATE["judged"] and not first:
+            first = _FIRST_RUN.acquire(timeout=0.5)
+            if not first:
+                out["skipped"] = refused()
+                if out["skipped"]:
+                    return out
         with _LIVE_LOCK:
             out["skipped"] = refused()
             if out["skipped"]:
@@ -734,16 +948,26 @@ def _run_cli(argv: list[str], data: bytes, env: dict[str, str], timeout: float, 
             shutil.rmtree(cwd, ignore_errors=True)
             with _LIVE_LOCK:
                 _LIVE.pop(proc, None)
-            # A run that hit the usage limit says so before its slot goes to a
-            # waiting call, which then does not start.
-            if not out["timed_out"] and not state.get("cancelled"):
-                try:
-                    found = _limit_of(out["stdout"], out["stderr"])
-                    if found:
-                        _latch_limit(found[0][:300], found[1])
-                except Exception:  # noqa: BLE001 - _call judges the run again
-                    pass
+            # A run that hit the usage limit, or whose credential was
+            # rejected, says so before its slot goes to a waiting call, which
+            # then does not start.
+            try:
+                if not out["timed_out"] and not state.get("cancelled"):
+                    rejected = _judge_credential(out["stdout"], out["stderr"])
+                    found = None if rejected else _limit_of(out["stdout"], out["stderr"])
+                else:
+                    # A run cut short still says, in its first events, whether
+                    # it was billed to usage credits.
+                    found = _overage_of(out["stdout"])
+                if found:
+                    _latch_limit(found[0][:300], found[1], state.get("model"))
+            except Exception:  # noqa: BLE001 - _call judges the run again
+                pass
     finally:
+        if first:
+            if out["code"] is not None or out["timed_out"]:
+                _STATE["judged"] = True
+            _FIRST_RUN.release()
         _SLOTS.release()
     return out
 
@@ -770,6 +994,20 @@ def _events(stdout: str) -> list[dict]:
     return events
 
 
+def _overage_of(stdout: bytes) -> tuple[str, Any] | None:
+    """
+    (_OVERAGE, reset time) when a rate-limit event of a run says that it is
+    billed to usage credits, else None. The event comes before the model's
+    first token, so a run cut short at its time limit, cancelled by its
+    caller or ended by an error result says it too.
+    """
+    for e in _events(stdout.decode("utf-8", errors="replace")):
+        info = e.get("rate_limit_info") if e.get("type") == "rate_limit_event" else None
+        if isinstance(info, dict) and info.get("isUsingOverage"):
+            return _OVERAGE, info.get("resetsAt")
+    return None
+
+
 def _limit_of(stdout: bytes, stderr: bytes) -> tuple[str, Any] | None:
     """
     (message, reset time) when a finished run's raw output says that the usage
@@ -789,20 +1027,64 @@ def _limit_of(stdout: bytes, stderr: bytes) -> tuple[str, Any] | None:
             result = e
     rejected = info.get("status") == "rejected"
     resets = info.get("resetsAt") if rejected else None
+    said = _scrub(stderr.decode("utf-8", errors="replace").strip()[-400:])
     if result is None:
-        said = _scrub(stderr.decode("utf-8", errors="replace").strip()[-400:])
-        return (said or "the CLI reported a rejected rate limit", resets) if rejected or _LIMIT_RE.search(said) else None
+        if rejected or _LIMIT_RE.search(said):
+            return said or "the CLI reported a rejected rate limit", resets
+        return _overage_of(stdout) or ((_OVERAGE, None) if _OVERAGE_RE.search(said) else None)
     if result.get("is_error") or result.get("subtype") != "success":
         message = _scrub(str(result.get("result") or "; ".join(str(x) for x in result.get("errors") or [])
                              or result.get("subtype"))[:400])
-        return (message, resets) if rejected or _LIMIT_RE.search(message) else None
-    if info.get("isUsingOverage"):
-        return "the plan's allowance ran out and requests are billing to usage credits", None
+        if rejected or _LIMIT_RE.search(message):
+            return message, resets
+        return _overage_of(stdout) or ((_OVERAGE, None) if _OVERAGE_RE.search(message + "\n" + said) else None)
+    if info.get("isUsingOverage") or _OVERAGE_RE.search(said):
+        # Until the window that ran out resets, when the CLI says when.
+        return _OVERAGE, info.get("resetsAt")
     ceiling = (os.getenv("CC_MAX_UTILIZATION") or "").strip()
     if ceiling and info.get("utilization") is not None and float(info["utilization"]) >= float(ceiling):
         return (f"{info.get('rateLimitType')} utilization {float(info['utilization']):.0%} reached "
                 f"CC_MAX_UTILIZATION {float(ceiling):.0%}", info.get("resetsAt"))
     return None
+
+
+def _credential_of(stdout: bytes, stderr: bytes) -> tuple[str, bool] | None:
+    """
+    (the CLI's message, whether it is sure) when a finished run says that its
+    credential was rejected (_AUTH_SURE_RE; or, not sure, status 401 or
+    "Invalid API key"), else None. Only the CLI's own channels count: an
+    error result, or standard error when there is no result.
+    """
+    result = next((e for e in reversed(_events(stdout.decode("utf-8", errors="replace"))) if e.get("type") == "result"), None)
+    if result is None:
+        message = _scrub(stderr.decode("utf-8", errors="replace").strip()[-400:])
+    elif result.get("is_error") or result.get("subtype") != "success":
+        message = _scrub(str(result.get("result") or "; ".join(str(x) for x in result.get("errors") or [])
+                             or result.get("subtype"))[:400])
+    else:
+        return None
+    if _AUTH_SURE_RE.search(message):
+        return message, True
+    if _AUTH_RE.search(message) or (result is not None and result.get("api_error_status") == 401):
+        return message, False
+    return None
+
+
+def _judge_credential(stdout: bytes, stderr: bytes) -> bool:
+    """
+    Latches a rejected credential when a finished run says so for sure, or
+    when this is the _AUTH_STRIKES-th weaker sign since the last answer.
+    Whether the run was refused for its credential.
+    """
+    found = _credential_of(stdout, stderr)
+    if found is None:
+        return False
+    with _LIMIT_LOCK:
+        _STATE["strikes"] += 0 if found[1] else 1
+        latch = found[1] or _STATE["strikes"] >= _AUTH_STRIKES
+    if latch:
+        _latch_credential(found[0])
+    return True
 
 
 def _audit(init: dict | None, tools: set[str]) -> list[str]:
@@ -874,6 +1156,8 @@ class ClaudeCodeForecaster:
         self.fetch_cap = min(MAX_FETCHES, max(2, budget - self.search_cap))
         self.claude_bin = claude_bin
         self.model = f"{'claudecode-agent' if self.tools else 'claudecode'}/{model}@{effort}"
+        # The model family, which a usage limit of its own can hold (ClaudeCodeLimit.family).
+        self.family = _family(model)
         self.deadline: float | None = None
         # Stats of every CLI call made through this instance, newest last.
         self.calls: list[dict] = []
@@ -1162,7 +1446,7 @@ class ClaudeCodeForecaster:
         # Which question the call is for, when the caller said so (CALL_TAG).
         tag = CALL_TAG.get() or {}
         s.update({k: tag[k] for k in ("post_id", "question_id") if isinstance(tag.get(k), (int, str))})
-        state: dict[str, Any] = {}
+        state: dict[str, Any] = {"model": self.api_model}
         start = time.monotonic()
         try:
             _install_signal_handlers()
@@ -1184,7 +1468,9 @@ class ClaudeCodeForecaster:
                 raise
             if run["skipped"]:
                 if run["skipped"] == _LIMIT_SKIP:
-                    raise ClaudeCodeLimit(limit_reached() or _LIMIT_SKIP)
+                    raise ClaudeCodeLimit(limit_reached(self.api_model) or _LIMIT_SKIP)
+                if run["skipped"] == _CREDENTIAL_SKIP:
+                    raise ClaudeCodeCredential(_held_credential())
                 raise ClaudeCodeSkipped(run["skipped"])
             s["time_limit_s"] = round(run["limit"])
             s["exit_code"] = run["code"]
@@ -1202,6 +1488,9 @@ class ClaudeCodeForecaster:
                 # Only the CLI's own channels say "limit": without a result
                 # event, standard output is the model's and the pages' text.
                 said = _scrub(stderr.strip()[-400:])
+                # Latched by _run_cli when this run settled it (_judge_credential).
+                if _AUTH_RE.search(said) and _STATE["credential"] is not None:
+                    raise ClaudeCodeCredential(f"Claude Code returned no result (exit code {run['code']}): {tail!r}")
                 if _LIMIT_RE.search(said) or rejected:
                     raise ClaudeCodeLimit(said or "the CLI reported a rejected rate limit")
                 if _STATE["stopped"]:
@@ -1210,10 +1499,12 @@ class ClaudeCodeForecaster:
             if result.get("is_error") or result.get("subtype") != "success":
                 message = _scrub(str(result.get("result") or "; ".join(str(x) for x in result.get("errors") or [])
                                      or result.get("subtype"))[:400])
+                error = f"Claude Code error ({result.get('subtype')}, status {result.get('api_error_status')}): {message}"
+                if (result.get("api_error_status") == 401 or _AUTH_RE.search(message)) and _STATE["credential"] is not None:
+                    raise ClaudeCodeCredential(error)
                 if _LIMIT_RE.search(message) or rejected:
                     raise ClaudeCodeLimit(message)
-                raise RuntimeError(
-                    f"Claude Code error ({result.get('subtype')}, status {result.get('api_error_status')}): {message}")
+                raise RuntimeError(error)
             if run["code"] not in (0, None):
                 logger.warning(f"{self.model}: the CLI answered but exited with code {run['code']}")
 
@@ -1236,17 +1527,21 @@ class ClaudeCodeForecaster:
             elif isinstance(exc, ClaudeCodeLimit):
                 s["outcome"] = f"limit: {str(exc)[:300]}"
                 limit = s.get("rate_limit") or {}
-                _latch_limit(str(exc)[:300], limit.get("resetsAt") if limit.get("status") == "rejected" else None)
+                _latch_limit(str(exc)[:300], limit.get("resetsAt") if limit.get("status") == "rejected" else None,
+                             self.api_model)
             elif isinstance(exc, ClaudeCodeSkipped):
                 s["outcome"] = f"skipped: {str(exc)[:300]}"
             elif isinstance(exc, asyncio.CancelledError):
                 s["outcome"] = "cancelled"
             else:
                 s["outcome"] = f"error: {type(exc).__name__}: {str(exc)[:300]}"
+                if isinstance(exc, ClaudeCodeCredential):
+                    _latch_credential(str(exc)[:300])
             self._log(s)
             raise
         s["seconds"] = round(time.monotonic() - start, 1)
         s["outcome"] = "ok"
+        _STATE["strikes"] = 0  # the credential works
         s["answer_chars"] = len(text)
         s["answer_tail"] = text[-600:]
         self._log(s)
@@ -1254,8 +1549,8 @@ class ClaudeCodeForecaster:
         # Money and shared-quota guards on a call that succeeded: the answer is
         # kept, later calls stop.
         limit = s.get("rate_limit") or {}
-        if limit.get("isUsingOverage"):
-            _latch_limit("the plan's allowance ran out and requests are billing to usage credits")
+        if limit.get("isUsingOverage") or _OVERAGE_RE.search(stderr[-400:]):
+            _latch_limit(_OVERAGE, limit.get("resetsAt"))
         else:
             ceiling = (os.getenv("CC_MAX_UTILIZATION") or "").strip()
             if ceiling and limit.get("utilization") is not None and float(limit["utilization"]) >= float(ceiling):
@@ -1264,7 +1559,9 @@ class ClaudeCodeForecaster:
         return text, s
 
     async def invoke(self, prompt: str) -> str:
-        message = limit_reached()
+        if _STATE["credential"] is not None:
+            raise ClaudeCodeCredential(_held_credential())
+        message = limit_reached(self.api_model)
         if message is not None:
             raise ClaudeCodeLimit(message)
         kind = _kind(prompt)

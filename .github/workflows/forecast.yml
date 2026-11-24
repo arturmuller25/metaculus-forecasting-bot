@@ -112,6 +112,8 @@ jobs:
           SHADOW_MODELS: ${{ vars.SHADOW_MODELS }}
           # Members without tools (empty: the default pair in main.py) and the
           # reserve that joins the pool when fewer than two members answer.
+          # A member on the Claude Code CLI is written
+          # claudecode/<model>@<effort>|<fallback model>.
           ENSEMBLE_MODELS: ${{ vars.ENSEMBLE_MODELS }}
           RESERVE_MODEL: ${{ vars.RESERVE_MODEL }}
           # Deferred panel experiments, recorded only (gap_fill.py,
@@ -138,6 +140,9 @@ jobs:
           CC_MAX_PARALLEL: ${{ vars.CC_MAX_PARALLEL }}
           # An ISO time before which no Claude Code call is made.
           CC_NOT_BEFORE: ${{ vars.CC_NOT_BEFORE }}
+          # Seconds a Claude Code member has for a question before its
+          # fallback model answers (empty: 240).
+          CC_MEMBER_TIME_LIMIT: ${{ vars.CC_MEMBER_TIME_LIMIT }}
           # Tournaments outside FutureEval, run Claude-only (Anthropic key),
           # comma-separated modes, e.g. "market_pulse,animal_futures".
           EXTRA_MODES: ${{ vars.EXTRA_MODES }}
