@@ -216,7 +216,7 @@ All optional; defaults live in `main.py`. See `.env.example`.
 | Variable | Default | Purpose |
 |---|---|---|
 | `FORECAST_MODEL` | `openrouter/openai/gpt-6.1-sol` | forecasting model when the ensemble is off |
-| `RESEARCH_MODEL` | `openrouter/openai/gpt-5.6-sol:online` | primary research model (web search) |
+| `RESEARCH_MODEL` | `openrouter/openai/gpt-5.6-sol:online` | primary research model (web search); `none` leaves this source out of the briefing, and the other sources still run |
 | `PARSER_MODEL` | `openrouter/openai/gpt-4o-mini` | extracts structured values from model output |
 | `REASONING_EFFORT` | `high` | reasoning effort for forecasting models |
 | `RESEARCH_REASONING` | `low` | reasoning effort for research calls |

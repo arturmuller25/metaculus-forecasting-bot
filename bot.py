@@ -663,6 +663,12 @@ class ForecasterBot(ForecastBot):
             labels = ["Primary web research", "Resolution source download", "Market statistics"] + list(
                 self._research_providers
             )
+            # No URL in the criteria, or a question that is not about a market
+            # series, is normal for those two steps, and so is the primary
+            # research when it is turned off (RESEARCH_MODEL=none).
+            quiet = {"Resolution source download", "Market statistics"}
+            if self.get_llm("researcher") in ("None", "no_research"):
+                quiet.add("Primary web research")
             for label, b in zip(labels, blocks):
                 if isinstance(b, Exception):
                     logger.warning(f"Research provider {label} failed: {type(b).__name__}: {b}")
@@ -670,9 +676,7 @@ class ForecasterBot(ForecastBot):
                 text = (b or "").strip()
                 sizes.append(f"{label} {len(text)}")
                 if not text:
-                    # No URL in the criteria, or a question that is not about a
-                    # market series, is normal for these two steps.
-                    if label not in ("Resolution source download", "Market statistics"):
+                    if label not in quiet:
                         logger.warning(f"Research provider {label} returned nothing for {question.page_url}")
                     continue
                 parts.append(f"## Source: {label}\n{text}")

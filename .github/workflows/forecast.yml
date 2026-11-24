@@ -116,6 +116,9 @@ jobs:
           # claudecode/<model>@<effort>|<fallback model>.
           ENSEMBLE_MODELS: ${{ vars.ENSEMBLE_MODELS }}
           RESERVE_MODEL: ${{ vars.RESERVE_MODEL }}
+          # Primary web research model (empty: the default in main.py);
+          # "none" leaves that source out of the briefing.
+          RESEARCH_MODEL: ${{ vars.RESEARCH_MODEL }}
           # Deferred panel experiments, recorded only (gap_fill.py,
           # supervisor.py): "1" turns each on; PANEL_SHARE samples questions.
           GAP_FILL: ${{ vars.GAP_FILL }}
