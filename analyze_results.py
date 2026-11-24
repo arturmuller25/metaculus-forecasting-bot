@@ -25,6 +25,7 @@ import json
 import math
 import os
 import re
+import shutil
 import statistics
 import subprocess
 import sys
@@ -147,18 +148,30 @@ def shadow_records() -> dict[tuple[int, str], dict]:
 
 def fetch_artifacts() -> None:
     runs = json.loads(subprocess.run(
-        ["gh", "run", "list", "--workflow", "forecast.yml", "--limit", "200", "--json", "databaseId"],
+        ["gh", "run", "list", "--workflow", "forecast.yml", "--limit", "200", "--json", "databaseId,status"],
         capture_output=True, text=True, check=True,
     ).stdout)
     for run in runs:
+        if run.get("status") != "completed":
+            continue  # a run still going uploads its records only at the end
         target = os.path.join("logs", "artifacts", str(run["databaseId"]))
         if os.path.isdir(target):
             continue
-        subprocess.run(
-            ["gh", "run", "download", str(run["databaseId"]), "--pattern", "forecast-records-*", "--dir", target],
+        # Downloaded next to the artifacts folder and moved in only when complete,
+        # so a failed download is tried again on the next call.
+        partial = os.path.join("logs", "artifacts_partial", str(run["databaseId"]))
+        shutil.rmtree(partial, ignore_errors=True)
+        done = subprocess.run(
+            ["gh", "run", "download", str(run["databaseId"]), "--pattern", "forecast-records-*", "--dir", partial],
             capture_output=True, text=True,
         )
-        os.makedirs(target, exist_ok=True)  # also marks runs without records as done
+        if done.returncode == 0 and os.path.isdir(partial):
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            os.rename(partial, target)
+        elif any(s in (done.stderr or "") for s in ("no artifact matches", "no valid artifacts found")):
+            os.makedirs(target, exist_ok=True)  # a run without records (or expired ones) is done
+        else:
+            shutil.rmtree(partial, ignore_errors=True)
 
 
 # ---------------------------------------------------------------------------
